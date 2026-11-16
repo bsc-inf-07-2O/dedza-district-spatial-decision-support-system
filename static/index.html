@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dedza District Spatial Decision Support System</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <aside class="panel">
+    <p class="eyebrow">Public service access · Dedza, Malawi</p>
+    <h1>Dedza District Spatial Decision Support System <span>(DD-SDSS)</span></h1>
+    <p class="lede">
+      Spatial screening of school and health access, mapped roads and waterways
+      to support preliminary public-service planning.
+    </p>
+    <section class="area-control">
+      <label for="ta-search">Traditional Authority</label>
+      <div class="ta-control">
+        <div class="ta-searchbox">
+          <input id="ta-search" type="search" placeholder="Search or select an area" autocomplete="off" aria-autocomplete="list" aria-controls="ta-options" aria-expanded="false" />
+          <button type="button" id="toggle-ta-options" aria-label="Browse all Traditional Authorities" title="Browse all Traditional Authorities" aria-expanded="false">▾</button>
+          <button type="button" id="clear-ta-search" aria-label="Clear search" title="Clear search" hidden>×</button>
+          <div id="ta-options" class="ta-options" role="listbox" aria-label="Traditional Authorities" hidden></div>
+        </div>
+        <button type="button" id="clear-ta" aria-pressed="true">District</button>
+      </div>
+      <p class="area-status" id="area-status" role="status">Loading Dedza areas...</p>
+    </section>
+    <section class="route-control">
+      <h2>Road route estimate</h2>
+      <p class="control-hint">Compare the shortest-distance route, quickest estimated route, and another alternative where available. Route distance and estimated travel time will appear on the map.</p>
+      <label for="route-settlement">From settlement</label>
+      <select id="route-settlement">
+        <option value="">Select a settlement</option>
+      </select>
+      <label for="route-facility">To health facility</label>
+      <select id="route-facility">
+        <option value="">Select a health facility</option>
+      </select>
+      <div class="route-actions">
+        <button type="button" id="find-route" disabled>Find route</button>
+        <button type="button" id="clear-route" disabled>Clear</button>
+      </div>
+      <p id="route-control-status" class="area-status" role="status">Choose a settlement and facility to estimate a route.</p>
+    </section>
+    <section class="school-access-control">
+      <h2>School access radius</h2>
+      <label for="school-radius">Maximum straight-line distance (km)</label>
+      <input id="school-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="school-radius-help" />
+      <p class="control-hint" id="school-radius-help">After changing the value, click elsewhere to update. Counts update and settlement dots show which are within or beyond this distance; no school-radius circles are drawn. Keep the Settlements map layer enabled to see the dots.</p>
+      <p class="area-status" id="school-access-status" role="status"></p>
+    </section>
+    <section class="coverage-profile">
+      <h2>School coverage profile</h2>
+      <div id="school-thresholds" class="threshold-list"></div>
+    </section>
+    <section class="population-profile">
+      <h2>Population by health access</h2>
+      <div id="population-access-profile" class="population-list"></div>
+    </section>
+    <section class="scenario-control">
+      <h2>Facility site comparison</h2>
+      <label for="scenario-type">Proposed facility</label>
+      <select id="scenario-type" aria-describedby="scenario-help">
+        <option value="school">School</option>
+        <option value="health">Health centre</option>
+      </select>
+      <label for="scenario-radius">Access radius (km)</label>
+      <input id="scenario-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="scenario-help" />
+      <p class="control-hint" id="scenario-help">Choose a facility type and radius, then add candidate sites. Compare separate signals: WorldPop population within the straight-line radius, settlements newly within 30- and 60-minute road-time bands versus existing same-type services, and the affected TAs. Road times use indicative motorcycle speeds and exclude connector time, traffic and road conditions. Facility capacity data is unavailable and is not scored. Each candidate is assessed independently; field verification is needed.</p>
+      <div class="scenario-actions">
+        <button type="button" id="place-scenario">Add site on map</button>
+        <button type="button" id="clear-scenario" title="Clear candidate sites" disabled>Clear</button>
+      </div>
+      <p class="area-status" id="scenario-status" role="status" aria-live="polite">No candidate sites yet. Add a site on the map to compare its potential population reach.</p>
+    </section>
+    <div class="kpis" id="kpis"></div>
+    <section>
+      <h2>Map layers</h2>
+      <label><input type="checkbox" id="lyr-cells" checked /> Health access grid</label>
+      <label><input type="checkbox" id="lyr-facilities" checked /> Health facilities</label>
+      <label><input type="checkbox" id="lyr-health2026" checked /> Health facilities · 2026 reference</label>
+      <label><input type="checkbox" id="lyr-schools" checked /> Schools</label>
+      <label><input type="checkbox" id="lyr-settlements" checked /> Settlements</label>
+      <label><input type="checkbox" id="lyr-buffers" /> 5 km coverage rings</label>
+      <label><input type="checkbox" id="lyr-roads" checked /> Roads</label>
+      <label><input type="checkbox" id="lyr-water" checked /> Mapped waterways</label>
+      <label><input type="checkbox" id="lyr-priority" checked /> Priority screening cells</label>
+    </section>
+    <section>
+      <h2>Legend</h2>
+      <ul class="legend">
+        <li><span class="swatch served"></span> Served (≤ 5 km)</li>
+        <li><span class="swatch underserved"></span> Underserved (5–8 km)</li>
+        <li><span class="swatch unserved"></span> Unserved (&gt; 8 km)</li>
+        <li><span class="swatch facility"></span> Health facility · circle</li>
+        <li><span class="swatch facility-2026"></span> 2026 health reference · diamond</li>
+        <li><span class="swatch school"></span> School · square</li>
+        <li><span class="swatch settlement-in"></span> Settlement within school radius</li>
+        <li><span class="swatch settlement-out"></span> Settlement beyond school radius</li>
+        <li><span class="swatch scenario-site"></span> Numbered candidate site and radius</li>
+        <li><span class="swatch road"></span> Road network</li>
+        <li><span class="swatch route"></span> Selected route estimate</li>
+        <li><span class="swatch water"></span> Mapped waterway</li>
+      </ul>
+    </section>
+    <p class="footnote" id="sources"></p>
+  </aside>
+  <main>
+    <div id="map">
+      <section id="route-results-panel" class="map-route-results" aria-labelledby="route-results-title" hidden>
+        <h2 id="route-results-title">Route comparison</h2>
+        <div id="route-options" class="route-options" role="group" aria-label="Available route choices"></div>
+        <div class="route-map-metrics" aria-label="Selected route metrics">
+          <div><span>Mapped-road distance</span><strong id="route-road-distance">—</strong></div>
+          <div><span>Total estimated distance</span><strong id="route-total-distance">—</strong></div>
+          <div><span>Estimated travel time</span><strong id="route-travel-time">—</strong></div>
+          <div><span>Straight-line access</span><strong id="route-connectors">—</strong></div>
+        </div>
+        <p id="route-status" class="map-route-status" role="status" aria-live="polite">Choose a settlement and facility to estimate a route.</p>
+      </section>
+      <section id="scenario-results" class="scenario-results map-scenario-results" aria-labelledby="scenario-results-title" hidden>
+        <header class="scenario-results-header">
+          <div>
+            <h2 id="scenario-results-title">Candidate results</h2>
+            <p id="scenario-results-summary"></p>
+          </div>
+          <button type="button" id="toggle-scenario-results" aria-expanded="true" aria-controls="scenario-candidate-list" aria-label="Minimize candidate results">Hide</button>
+        </header>
+        <ol id="scenario-candidate-list" class="scenario-candidate-list"></ol>
+      </section>
+    </div>
+    <section class="analysis-deck">
+      <nav class="analysis-tabs" aria-label="Analysis views">
+        <button type="button" class="analysis-tab active" data-panel="briefing-panel" aria-selected="true">Briefing</button>
+        <button type="button" class="analysis-tab" data-panel="priority-panel" aria-selected="false">Priority cells</button>
+        <button type="button" class="analysis-tab" data-panel="ta-panel" aria-selected="false">TA priorities</button>
+        <button type="button" class="analysis-tab" data-panel="settlement-panel" aria-selected="false">Settlement access</button>
+        <button type="button" id="export-brief" class="export-button">Export planning CSV</button>
+      </nav>
+      <section class="table-wrap analysis-panel briefing-panel active" id="briefing-panel">
+        <header class="briefing-header">
+          <div>
+            <p class="eyebrow">DD-SDSS · decision brief</p>
+            <h2 id="briefing-title">Dedza District</h2>
+            <p id="briefing-lead"></p>
+          </div>
+          <button type="button" id="print-brief" class="export-button">Print / Save PDF</button>
+        </header>
+        <div class="briefing-kpis" id="briefing-kpis"></div>
+        <div class="briefing-columns">
+          <section class="briefing-section">
+            <h3>Decision signals</h3>
+            <ul id="briefing-signals"></ul>
+          </section>
+          <section class="briefing-section">
+            <h3>Highest-priority health-gap cells</h3>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Cell</th><th>Health distance</th><th>Road-distance score</th></tr></thead>
+                <tbody id="briefing-priorities"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+        <details class="briefing-methods">
+          <summary>Methods, sources and limitations</summary>
+          <ul>
+            <li>Baseline health access uses the original MOH facility dataset and a 3 km analysis grid: served at 5 km or less, underserved at 5–8 km, and unserved beyond 8 km.</li>
+            <li>WorldPop 2025 100 m estimates are summed into those baseline health-grid classes; they are modelled population estimates, not a census or school-access measure.</li>
+            <li>School and health distances to settlements are straight-line. Settlement counts are not population-weighted, and the OSM population attribute is present for only a small subset.</li>
+            <li>The 2026 ArcGIS health facilities are a separate reference layer and do not recalculate baseline health coverage.</li>
+            <li>Available water-point extracts contain no Dedza points. Mapped waterways are not water points. Route choices use the mapped road/path network and compare shortest distance with estimated time based on assumed speeds; they do not model traffic, road condition or seasonal closures, and unmapped roads may change results.</li>
+          </ul>
+          <p>Sources: MOH Malawi baseline facilities; supplied Malawi school dataset; WorldPop 2025 R2025A v1 (CC BY 4.0); ArcGIS Malawi Health 2026 FeatureServer (license/provenance to confirm); OSM settlements, roads and waterways; geoBoundaries Malawi administrative boundaries.</p>
+        </details>
+      </section>
+      <section class="table-wrap analysis-panel" id="priority-panel" hidden>
+        <h2>Priority screening cells</h2>
+        <p>Highest-scoring 3 km cells using health-facility distance, road density and mapped waterway length as preliminary proxies.</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Coverage</th>
+                <th>Distance to facility</th>
+                <th>Roads</th>
+                <th>Mapped waterways</th>
+                <th>Road-distance score</th>
+                <th>Planning prompt</th>
+              </tr>
+            </thead>
+            <tbody id="recs"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="table-wrap analysis-panel" id="ta-panel" hidden>
+        <h2>Traditional Authority priorities</h2>
+        <p>Ranked by estimated population in baseline health cells more than 8 km from a facility (WorldPop 2025). The share shows the proportion of each TA's estimated population affected. This is a screening priority, not a measure of facility capacity. Select a row to filter the map.</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Priority rank</th>
+                <th>Traditional Authority</th>
+                <th>Health facilities</th>
+                <th>2026 health reference</th>
+                <th>Schools</th>
+                <th>Settlements</th>
+                <th>Settlements ≤ 1 km from school</th>
+                <th>Settlements &gt; 5 km from health</th>
+                <th>Unserved health cells</th>
+                <th>Est. population in unserved cells</th>
+                <th>Est. share of TA population</th>
+              </tr>
+            </thead>
+            <tbody id="ta-comparison-rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="table-wrap analysis-panel" id="settlement-panel" hidden>
+        <h2>Settlement-level access</h2>
+        <p>Nearest mapped school and health facility by straight-line distance. TA inclusion uses boundary geometry; OSM admin labels may differ. Counts are not population-weighted.</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Settlement</th>
+                <th>OSM ADM3 label</th>
+                <th>Nearest school</th>
+                <th>School distance</th>
+                <th>Nearest health facility</th>
+                <th>Health distance</th>
+              </tr>
+            </thead>
+            <tbody id="settlement-access-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf@7/turf.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
