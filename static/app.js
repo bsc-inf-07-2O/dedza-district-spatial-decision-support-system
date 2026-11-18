@@ -224,7 +224,7 @@ async function init() {
     if (temporary) {
       scenarioNoticeTimer = setTimeout(() => {
         scenarioNotice.hidden = true;
-      }, 7000);
+      }, 4000);
     }
   }
   closeScenarioNotice.addEventListener("click", () => {
@@ -327,6 +327,210 @@ async function init() {
     (facility.source === "Baseline" ? baselineFacilities : referenceFacilities).appendChild(option);
   });
   routeFacilitySelect.append(baselineFacilities, referenceFacilities);
+
+  function enhanceSelect(select) {
+    const label = document.querySelector(`label[for="${select.id}"]`);
+    const wrapper = document.createElement("div");
+    wrapper.className = "custom-select";
+    select.before(wrapper);
+    wrapper.appendChild(select);
+    select.classList.add("custom-select-source");
+    select.tabIndex = -1;
+    select.setAttribute("aria-hidden", "true");
+
+    const trigger = document.createElement("button");
+    trigger.id = `${select.id}-button`;
+    trigger.type = "button";
+    trigger.className = "custom-select-trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.setAttribute("aria-controls", `${select.id}-listbox`);
+    if (label) {
+      trigger.setAttribute("aria-label", label.textContent.trim());
+      label.htmlFor = trigger.id;
+    }
+    const describedBy = select.getAttribute("aria-describedby");
+    if (describedBy) trigger.setAttribute("aria-describedby", describedBy);
+
+    const menu = document.createElement("div");
+    menu.id = `${select.id}-listbox`;
+    menu.className = "custom-select-menu";
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-labelledby", trigger.id);
+    menu.hidden = true;
+    wrapper.append(trigger, menu);
+
+    let typeahead = "";
+    let typeaheadTimer = null;
+    const options = () => [...menu.querySelectorAll(".custom-select-option")];
+    const sync = () => {
+      const selected = select.options[select.selectedIndex];
+      trigger.textContent = selected?.textContent.trim() || "Select an option";
+      trigger.disabled = select.disabled;
+      options().forEach((option) => {
+        option.setAttribute("aria-selected", String(option.dataset.value === select.value));
+      });
+    };
+    const close = (returnFocus = false) => {
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+      if (returnFocus) trigger.focus();
+    };
+    const choose = (option) => {
+      if (!option || option.getAttribute("aria-disabled") === "true" || select.disabled) return;
+      select.value = option.dataset.value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      sync();
+      close(true);
+    };
+    const addOption = (nativeOption) => {
+      const option = document.createElement("div");
+      option.className = "custom-select-option";
+      option.setAttribute("role", "option");
+      option.tabIndex = -1;
+      option.dataset.value = nativeOption.value;
+      option.textContent = nativeOption.textContent.trim();
+      if (nativeOption.disabled) option.setAttribute("aria-disabled", "true");
+      menu.appendChild(option);
+    };
+    const renderOptions = () => {
+      menu.replaceChildren();
+      [...select.children].forEach((child) => {
+        if (child instanceof HTMLOptGroupElement) {
+          const groupLabel = document.createElement("div");
+          groupLabel.className = "custom-select-group";
+          groupLabel.textContent = child.label;
+          menu.appendChild(groupLabel);
+          Array.from(child.children).forEach(addOption);
+        } else if (child instanceof HTMLOptionElement) {
+          addOption(child);
+        }
+      });
+      sync();
+    };
+    const open = (focusSelected) => {
+      if (select.disabled) return;
+      renderOptions();
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      if (focusSelected) {
+        (options().find((option) => option.dataset.value === select.value) || options()[0])?.focus();
+      }
+    };
+    const focusTypeaheadMatch = (key) => {
+      const character = key.toLocaleLowerCase();
+      typeahead = typeahead && Array.from(typeahead).every((item) => item === character)
+        ? character
+        : typeahead + character;
+      clearTimeout(typeaheadTimer);
+      typeaheadTimer = setTimeout(() => { typeahead = ""; }, 700);
+      const match = options().find((option) =>
+        option.textContent.trim().toLocaleLowerCase().startsWith(typeahead)
+      );
+      if (match) match.focus();
+    };
+
+    trigger.addEventListener("click", () => {
+      if (menu.hidden) open(false);
+      else close();
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key.length === 1 && event.key !== " " && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        open(false);
+        focusTypeaheadMatch(event.key);
+        return;
+      }
+      if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        open(true);
+      } else if (event.key === "Escape") {
+        close();
+      }
+    });
+    menu.addEventListener("click", (event) => {
+      const option = event.target.closest(".custom-select-option");
+      if (option) choose(option);
+    });
+    menu.addEventListener("keydown", (event) => {
+      const list = options();
+      const index = list.indexOf(document.activeElement);
+      if (event.key.length === 1 && event.key !== " " && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        focusTypeaheadMatch(event.key);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        close(true);
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        list[(index + direction + list.length) % list.length]?.focus();
+      } else if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        list[event.key === "Home" ? 0 : list.length - 1]?.focus();
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        choose(document.activeElement);
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (!wrapper.contains(event.target)) close();
+    });
+    select.addEventListener("change", sync);
+    new MutationObserver(() => {
+      renderOptions();
+      sync();
+    }).observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "label"] });
+    renderOptions();
+  }
+  [routeSettlementSelect, routeFacilitySelect, scenarioTypeInput].forEach(enhanceSelect);
+
+  function enhanceNumberInput(input) {
+    const label = document.querySelector(`label[for="${input.id}"]`);
+    const wrapper = document.createElement("div");
+    wrapper.className = "number-input-control";
+    input.before(wrapper);
+    wrapper.appendChild(input);
+
+    const stepper = document.createElement("div");
+    stepper.className = "number-stepper";
+    const createStepButton = (name, icon, direction) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "number-stepper-button";
+      button.setAttribute("aria-label", `${name} ${label?.textContent.trim() || input.id}`);
+      button.setAttribute("aria-controls", input.id);
+      button.textContent = icon;
+      button.addEventListener("click", () => {
+        const previousValue = input.value;
+        if (direction > 0) input.stepUp();
+        else input.stepDown();
+        if (input.value !== previousValue) {
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        input.focus();
+        updateButtons();
+      });
+      return button;
+    };
+    const increase = createStepButton("Increase", "▲", 1);
+    const decrease = createStepButton("Decrease", "▼", -1);
+    stepper.append(increase, decrease);
+    wrapper.appendChild(stepper);
+
+    const updateButtons = () => {
+      const value = input.valueAsNumber;
+      const min = input.min === "" ? -Infinity : Number(input.min);
+      const max = input.max === "" ? Infinity : Number(input.max);
+      increase.disabled = input.disabled || (Number.isFinite(value) && value >= max);
+      decrease.disabled = input.disabled || (Number.isFinite(value) && value <= min);
+    };
+    input.addEventListener("input", updateButtons);
+    input.addEventListener("change", updateButtons);
+    updateButtons();
+  }
+  [schoolRadiusInput, scenarioRadiusInput].forEach(enhanceNumberInput);
 
   settlements.features.forEach((settlement) => {
     let nearest = null;
@@ -562,6 +766,7 @@ async function init() {
       option.type = "button";
       option.className = "ta-option";
       option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(name === state.name));
       option.textContent = name;
       option.addEventListener("click", () => {
         selectTA(name);
@@ -672,6 +877,12 @@ async function init() {
     layer.clearLayers();
     scenarioCandidateList.replaceChildren();
     scenarioResults.hidden = state.scenarios.length === 0;
+    const mapContainer = map.getContainer();
+    const hasScenarioResults = state.scenarios.length > 0;
+    if (mapContainer.classList.contains("has-scenario-results") !== hasScenarioResults) {
+      mapContainer.classList.toggle("has-scenario-results", hasScenarioResults);
+      requestAnimationFrame(() => map.invalidateSize({ pan: false }));
+    }
     scenarioResults.classList.toggle("collapsed", state.scenarioResultsCollapsed);
     scenarioResultsToggle.textContent = state.scenarioResultsCollapsed ? "Show" : "Hide";
     scenarioResultsToggle.setAttribute("aria-expanded", String(!state.scenarioResultsCollapsed));
@@ -1584,7 +1795,7 @@ async function init() {
     if (state.placingScenario) {
       showScenarioNotice(
         "Place candidate site",
-        "Click inside the selected district or Traditional Authority. Detected building footprints will block the point.",
+        "Click inside your selected area to place a site. Detected buildings block placement.",
         "warning",
         false
       );
@@ -1652,7 +1863,7 @@ async function init() {
       showScenarioNotice("Invalid radius", message, "error", true);
       return;
     }
-    const checkingMessage = "Checking building occupancy and available environmental data...";
+    const checkingMessage = "Checking for detected building footprints...";
     scenarioStatus.textContent = checkingMessage;
     showScenarioNotice("Screening candidate site", checkingMessage, "warning", false);
     const requestId = ++state.siteScreeningRequestId;
@@ -1691,8 +1902,8 @@ async function init() {
     state.scenarioResultsCollapsed = false;
     placeScenarioButton.textContent = "Add another site";
     const successMessage = siteScreening.buildings_available
-      ? "Candidate added. No detected building footprint contains this point; parcel vacancy still needs field verification."
-      : "Candidate added, but building occupancy could not be screened because building data is unavailable.";
+      ? "Candidate added. Review the estimates and verify the site in the field."
+      : "Candidate added. Building data is unavailable, so occupancy was not screened.";
     scenarioStatus.textContent = successMessage;
     showScenarioNotice(
       siteScreening.buildings_available ? "Candidate accepted for analysis" : "Candidate added with limited screening",
@@ -1701,6 +1912,12 @@ async function init() {
       true
     );
     render(activeData());
+    if (window.matchMedia("(max-width: 900px)").matches) {
+      map.getContainer().scrollIntoView({
+        block: "start",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    }
     estimateScenarioCandidate(candidate);
   }, true);
   document.getElementById("export-brief").addEventListener("click", exportPlanningBrief);

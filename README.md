@@ -1,6 +1,6 @@
 # Dedza District Spatial Decision Support System
 
-DD-SDSS is a Flask and Leaflet web GIS for preliminary public-service access screening in Dedza District, Malawi.
+DD-SDSS is a Flask and Leaflet web GIS for preliminary public-service access screening in Dedza District, Malawi. Spatial operations use the locally bundled Turf.js 7.4.0; its MIT license is included in `static/vendor/`.
 
 ## Run
 

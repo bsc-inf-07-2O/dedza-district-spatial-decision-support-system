@@ -38,6 +38,17 @@ def test_api_health_endpoint(client):
     assert "database_ready" in payload
 
 
+def test_homepage_uses_locally_served_turf_bundle(client):
+    homepage = client.get("/")
+    assert homepage.status_code == 200
+    assert b"/static/vendor/turf-7.4.0.min.js" in homepage.data
+    assert b"https://unpkg.com/@turf/turf" not in homepage.data
+
+    bundle = client.get("/static/vendor/turf-7.4.0.min.js")
+    assert bundle.status_code == 200
+    assert bundle.data
+
+
 def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypatch):
     raster_path = tmp_path / "land_cover.tif"
     with rasterio.open(
