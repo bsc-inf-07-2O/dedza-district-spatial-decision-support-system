@@ -27,6 +27,18 @@ const layers = {
   priority: L.layerGroup().addTo(map),
   scenario: L.layerGroup().addTo(map),
   buildings: L.layerGroup(),
+  slope: L.tileLayer("/api/environmental-tiles/slope/{z}/{x}/{y}.png", {
+    maxNativeZoom: 12,
+    maxZoom: 18,
+    opacity: 0.62,
+    attribution: "Mapzen Terrain Tiles; SRTM/GMTED2010 data courtesy of USGS",
+  }),
+  landCover: L.tileLayer("/api/environmental-tiles/land_cover/{z}/{x}/{y}.png", {
+    maxNativeZoom: 15,
+    maxZoom: 18,
+    opacity: 0.62,
+    attribution: "© ESA WorldCover 2021 / Contains modified Copernicus Sentinel data 2021",
+  }),
 };
 
 const selectedBoundary = L.geoJSON(null, {
@@ -175,6 +187,8 @@ async function init() {
   const scenarioNoticeIcon = document.getElementById("scenario-notice-icon");
   const closeScenarioNotice = document.getElementById("close-scenario-notice");
   const buildingToggle = document.getElementById("lyr-buildings");
+  const slopeToggle = document.getElementById("lyr-slope");
+  const landCoverToggle = document.getElementById("lyr-land-cover");
   const buildingLayerStatus = document.getElementById("building-layer-status");
   const environmentLayerStatus = document.getElementById("environment-layer-status");
   L.DomEvent.disableClickPropagation(scenarioResults);
@@ -188,9 +202,12 @@ async function init() {
   buildingLayerStatus.textContent = buildingLayer.available
     ? `${buildingLayer.count.toLocaleString()} detected footprints · ${buildingLayer.source} (${buildingLayer.date}; ${buildingLayer.license}). ${buildingLayer.message}`
     : `${buildingLayer.message} Run python scripts/import_buildings.py to fetch the Malawi tiles and clip them to Dedza.`;
+  slopeToggle.disabled = !siteLayers.terrain.available;
+  slopeToggle.title = siteLayers.terrain.message;
+  landCoverToggle.disabled = !siteLayers.land_cover.available;
+  landCoverToggle.title = siteLayers.land_cover.message;
   environmentLayerStatus.textContent = [
-    `Flood: ${siteLayers.flood_hazard.message}`,
-    `Terrain: ${siteLayers.terrain.message}`,
+    `Slope: ${siteLayers.terrain.message}`,
     `Land cover: ${siteLayers.land_cover.message}`,
   ].join(" ");
   let buildingRequestId = 0;
@@ -706,9 +723,7 @@ async function init() {
       occupancy.textContent = candidate.siteScreening.buildings_available
         ? "No detected footprint contains the candidate point; this does not confirm the parcel is vacant."
         : "Building footprints are unavailable; occupancy was not screened.";
-      const hazard = document.createElement("div");
-      hazard.textContent = candidate.siteScreening.flood_hazard_message;
-      popup.append(popupTitle, popupRadius, occupancy, hazard);
+      popup.append(popupTitle, popupRadius, occupancy);
       if (candidate.populationEstimate) {
         const population = document.createElement("div");
         population.textContent = `${Math.round(candidate.populationEstimate.additional_population_estimate).toLocaleString()} estimated additional residents`;
@@ -734,10 +749,7 @@ async function init() {
       siteScreening.textContent = candidate.siteScreening.buildings_available
         ? "No detected building footprint contains this point. This does not confirm the parcel is vacant."
         : "Building footprints are not installed; occupancy was not screened.";
-      const hazardScreening = document.createElement("p");
-      hazardScreening.className = "scenario-screening-note";
-      hazardScreening.textContent = candidate.siteScreening.flood_hazard_message;
-      card.append(siteScreening, hazardScreening);
+      card.appendChild(siteScreening);
 
       if (candidate.loading) {
         const loading = document.createElement("p");
@@ -971,7 +983,6 @@ async function init() {
         ? `${siteLayers.buildings.source}; ${siteLayers.buildings.date}; ${siteLayers.buildings.license}`
         : "Unavailable; occupancy not screened",
     ]);
-    rows.push(["hazard assessment", areaLabel, "flood", siteLayers.flood_hazard.message]);
     schoolCoverage.forEach(([threshold, count]) => {
       rows.push(["school coverage", areaLabel, `settlements within ${threshold} km`, `${count}/${active.settlements.length}`]);
     });
@@ -988,7 +999,6 @@ async function init() {
           ? "No detected footprint contains the candidate point; vacancy not confirmed"
           : "Not screened; building data unavailable",
       ]);
-      rows.push(["site screening", areaLabel, `${label} flood hazard`, candidate.siteScreening.flood_hazard_message]);
       rows.push(["scenario", areaLabel, `${label} radius km`, candidate.radius]);
       rows.push(["scenario", areaLabel, `${label} additional settlements in selected geography`, metrics.gain]);
       if (candidate.populationEstimate) {
@@ -1052,7 +1062,9 @@ async function init() {
   }
 
   function render(active) {
-    Object.values(layers).forEach((layer) => layer.clearLayers());
+    Object.values(layers).forEach((layer) => {
+      if (layer instanceof L.LayerGroup) layer.clearLayers();
+    });
     selectedBoundary.clearLayers();
 
     if (state.areas.length) {
@@ -1737,6 +1749,8 @@ async function init() {
   bind("lyr-water", layers.water);
   bind("lyr-priority", layers.priority);
   bind("lyr-buildings", layers.buildings);
+  bind("lyr-slope", layers.slope);
+  bind("lyr-land-cover", layers.landCover);
   buildingToggle.addEventListener("change", loadBuildingFeatures);
   map.on("moveend", scheduleBuildingLoad);
 }

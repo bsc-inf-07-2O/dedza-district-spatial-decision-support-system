@@ -6,16 +6,20 @@ import heapq
 import json
 import math
 import sqlite3
+import warnings
 from functools import lru_cache
 from pathlib import Path
 
 import duckdb
 import numpy as np
 import rasterio
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from rasterio.features import geometry_mask, rasterize
-from rasterio.transform import Affine
-from rasterio.windows import Window, from_bounds
+from rasterio.errors import NotGeoreferencedWarning
+from rasterio.io import MemoryFile
+from rasterio.transform import Affine, from_bounds
+from rasterio.windows import Window, from_bounds as window_from_bounds
+from rasterio.warp import Resampling, reproject
 
 from scripts.site_constraints import point_in_geometry
 
@@ -24,6 +28,10 @@ RAW = ROOT / "data" / "raw"
 DB_PATH = ROOT / "data" / "processed" / "dedza.sqlite"
 ROUTE_DB_PATH = ROOT / "data" / "processed" / "clip.duckdb"
 SITE_CONSTRAINT_DB_PATH = ROOT / "data" / "processed" / "site_constraints.sqlite"
+ENVIRONMENTAL_RASTER_PATHS = {
+    "land_cover": ROOT / "data" / "processed" / "environmental" / "land_cover.tif",
+    "slope": ROOT / "data" / "processed" / "environmental" / "slope.tif",
+}
 STATIC = ROOT / "static"
 ADM2_PATH = RAW / "MWI_ADM2_simplified.geojson"
 ADM3_PATH = RAW / "MWI_ADM3_simplified.geojson"
@@ -566,39 +574,40 @@ def site_layer_status() -> dict:
             "license": None,
             "message": "Building footprints are not imported.",
         },
-        "flood_hazard": {
-            "available": False,
+        "terrain": {
+            "available": ENVIRONMENTAL_RASTER_PATHS["slope"].is_file(),
             "message": (
-                "No verified Dedza flood-hazard or flood-susceptibility layer is installed. "
-                "Mapped waterways are not flood evidence."
+                "Slope is derived from Mapzen Terrain Tiles, a generalized terrain product "
+                "based primarily on SRTM; use for preliminary screening only."
+                if ENVIRONMENTAL_RASTER_PATHS["slope"].is_file()
+                else "Terrain and slope are not installed. Run python scripts/import_environmental_layers.py."
             ),
         },
-        "terrain": {
-            "available": False,
-            "message": "A DEM has not been installed for terrain or slope screening.",
-        },
         "land_cover": {
-            "available": False,
-            "message": "A land-cover layer has not been installed.",
+            "available": ENVIRONMENTAL_RASTER_PATHS["land_cover"].is_file(),
+            "message": (
+                "ESA WorldCover 2021 v200 at 10 m resolution; land-cover classes are indicative, "
+                "not parcel or wetland verification."
+                if ENVIRONMENTAL_RASTER_PATHS["land_cover"].is_file()
+                else "Land cover is not installed. Run python scripts/import_environmental_layers.py."
+            ),
         },
     }
-    if not SITE_CONSTRAINT_DB_PATH.is_file():
-        return status
-
-    with sqlite3.connect(SITE_CONSTRAINT_DB_PATH) as con:
-        metadata = dict(con.execute("SELECT key, value FROM metadata"))
-        count = con.execute("SELECT COUNT(*) FROM buildings").fetchone()[0]
-    status["buildings"] = {
-        "available": True,
-        "count": count,
-        "source": metadata.get("buildings_source"),
-        "date": metadata.get("buildings_date"),
-        "license": metadata.get("buildings_license"),
-        "message": (
-            "Footprints are mapped detections and may be incomplete or out of date; "
-            "no footprint does not prove land is vacant."
-        ),
-    }
+    if SITE_CONSTRAINT_DB_PATH.is_file():
+        with sqlite3.connect(SITE_CONSTRAINT_DB_PATH) as con:
+            metadata = dict(con.execute("SELECT key, value FROM metadata"))
+            count = con.execute("SELECT COUNT(*) FROM buildings").fetchone()[0]
+        status["buildings"] = {
+            "available": True,
+            "count": count,
+            "source": metadata.get("buildings_source"),
+            "date": metadata.get("buildings_date"),
+            "license": metadata.get("buildings_license"),
+            "message": (
+                "Footprints are mapped detections and may be incomplete or out of date; "
+                "no footprint does not prove land is vacant."
+            ),
+        }
     return status
 
 
@@ -921,7 +930,7 @@ def estimate_scenario_population(
         raise FileNotFoundError(f"WorldPop raster not found: {WORLDPOP_PATH}")
 
     with rasterio.open(WORLDPOP_PATH) as source:
-        window = from_bounds(left, bottom, right, top, source.transform)
+        window = window_from_bounds(left, bottom, right, top, source.transform)
         window = window.round_offsets(op=math.floor).round_lengths(op=math.ceil).intersection(
             Window(0, 0, source.width, source.height)
         )
@@ -1085,6 +1094,90 @@ def site_layers():
     return jsonify(site_layer_status())
 
 
+@app.get("/api/environmental-tiles/<layer>/<int:z>/<int:x>/<int:y>.png")
+def environmental_tile(layer: str, z: int, x: int, y: int):
+    if layer not in ENVIRONMENTAL_RASTER_PATHS:
+        return jsonify({"error": "Environmental layer must be land_cover or slope."}), 404
+    status_key = "land_cover" if layer == "land_cover" else "terrain"
+    status = site_layer_status()[status_key]
+    if not status["available"]:
+        return jsonify({"error": status["message"]}), 404
+    if not 0 <= z <= 18:
+        return jsonify({"error": "Zoom level must be between 0 and 18."}), 400
+    tile_count = 1 << z
+    if not (0 <= x < tile_count and 0 <= y < tile_count):
+        return jsonify({"error": "Tile coordinates are outside the supported range."}), 400
+
+    world = 2 * math.pi * 6_378_137.0
+    west = x / tile_count * world - world / 2
+    east = (x + 1) / tile_count * world - world / 2
+    north = world / 2 - y / tile_count * world
+    south = world / 2 - (y + 1) / tile_count * world
+    tile_transform = from_bounds(west, south, east, north, 256, 256)
+    source_path = ENVIRONMENTAL_RASTER_PATHS[layer]
+
+    with rasterio.open(source_path) as source:
+        nodata = source.nodata if source.nodata is not None else 0
+        pixels = np.full((256, 256), nodata, dtype=np.float32)
+        reproject(
+            source=rasterio.band(source, 1),
+            destination=pixels,
+            src_transform=source.transform,
+            src_crs=source.crs,
+            src_nodata=source.nodata,
+            dst_transform=tile_transform,
+            dst_crs="EPSG:3857",
+            dst_nodata=nodata,
+            resampling=Resampling.nearest,
+        )
+
+    rgba = np.zeros((4, 256, 256), dtype=np.uint8)
+    valid = np.isfinite(pixels) & (pixels != nodata)
+    if layer == "land_cover":
+        palette = {
+            10: (38, 115, 45),
+            20: (153, 191, 74),
+            30: (192, 220, 130),
+            40: (232, 198, 83),
+            50: (202, 75, 64),
+            60: (184, 164, 133),
+            70: (235, 239, 240),
+            80: (61, 144, 201),
+            90: (76, 174, 143),
+            95: (37, 112, 95),
+            100: (123, 167, 91),
+        }
+        for value, color in palette.items():
+            selected = valid & (pixels == value)
+            rgba[:3, selected] = np.asarray(color, dtype=np.uint8)[:, None]
+            rgba[3, selected] = 190
+    else:
+        slope_colors = (
+            (0, 5, (65, 150, 88)),
+            (5, 15, (207, 197, 93)),
+            (15, 30, (221, 130, 65)),
+            (30, math.inf, (171, 62, 56)),
+        )
+        for lower, upper, color in slope_colors:
+            selected = valid & (pixels >= lower) & (pixels < upper)
+            rgba[:3, selected] = np.asarray(color, dtype=np.uint8)[:, None]
+            rgba[3, selected] = 190
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", NotGeoreferencedWarning)
+        with MemoryFile() as memory_file:
+            with memory_file.open(
+                driver="PNG", width=256, height=256, count=4, dtype="uint8"
+            ) as image:
+                image.write(rgba)
+            tile = memory_file.read()
+    return Response(
+        tile,
+        mimetype="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/api/buildings")
 def buildings():
     parts = request.args.get("bbox", "").split(",")
@@ -1168,8 +1261,6 @@ def site_screening():
         "occupied": building is not None,
         "building": building,
         "building_message": layers["buildings"]["message"],
-        "flood_hazard_available": layers["flood_hazard"]["available"],
-        "flood_hazard_message": layers["flood_hazard"]["message"],
     })
 
 

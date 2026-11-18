@@ -327,6 +327,8 @@ label { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 
 .swatch.road { background: #cfcfcf; }
 .swatch.route { height: 3px; border-radius: 0; background: #c49bff; }
 .swatch.water { background: var(--water); }
+.swatch.environmental-slope { background: linear-gradient(90deg, #419658, #cfc55d, #dd8241, #ab3e38); }
+.swatch.environmental-landcover { background: linear-gradient(90deg, #26732d, #e8c653, #ca4b40, #3d90c9); }
 .leaflet-marker-icon.map-symbol { border: 0; background: transparent; }
 .map-symbol span {
   display: block;

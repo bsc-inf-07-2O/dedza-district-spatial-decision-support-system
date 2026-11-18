@@ -5,6 +5,7 @@ venv/
 data/processed/clip.duckdb
 data/processed/site_constraints.sqlite
 data/processed/site_constraints.sqlite.tmp
+data/processed/environmental/
 scripts/_inspect.py
 scripts/_inspect2.py
 scripts/_probe_duckdb.py

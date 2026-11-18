@@ -1,8 +1,11 @@
 import json
 import sqlite3
 
+import numpy as np
 import pytest
+import rasterio
 import app as app_module
+from rasterio.transform import from_origin
 
 from app import (
     app,
@@ -33,6 +36,56 @@ def test_api_health_endpoint(client):
     payload = response.get_json()
     assert payload["status"] == "ok"
     assert "database_ready" in payload
+
+
+def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypatch):
+    raster_path = tmp_path / "land_cover.tif"
+    with rasterio.open(
+        raster_path,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3857",
+        transform=from_origin(-20_000_000, 20_000_000, 20_000_000, 20_000_000),
+        nodata=0,
+    ) as dataset:
+        dataset.write(np.array([[10, 40], [50, 80]], dtype=np.uint8), 1)
+    monkeypatch.setattr(
+        app_module,
+        "ENVIRONMENTAL_RASTER_PATHS",
+        {"land_cover": raster_path, "slope": tmp_path / "missing-slope.tif"},
+    )
+    monkeypatch.setattr(
+        app_module, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite"
+    )
+
+    status = client.get("/api/site-layers").get_json()
+    assert status["land_cover"]["available"] is True
+    assert status["terrain"]["available"] is False
+    assert set(status) == {"buildings", "terrain", "land_cover"}
+
+    response = client.get("/api/environmental-tiles/land_cover/0/0/0.png")
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert response.data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_environmental_tile_rejects_invalid_zoom(client, tmp_path, monkeypatch):
+    raster_path = tmp_path / "land_cover.tif"
+    raster_path.touch()
+    monkeypatch.setattr(
+        app_module,
+        "ENVIRONMENTAL_RASTER_PATHS",
+        {"land_cover": raster_path, "slope": tmp_path / "missing-slope.tif"},
+    )
+
+    response = client.get("/api/environmental-tiles/land_cover/19/0/0.png")
+
+    assert response.status_code == 400
+    assert "Zoom level" in response.get_json()["error"]
 
 
 def test_summary_endpoint_returns_metrics(client):
@@ -332,7 +385,9 @@ def test_site_screening_blocks_candidate_inside_detected_building(client, tmp_pa
     result = response.get_json()
     assert result["buildings_available"] is True
     assert result["occupied"] is True, result
-    assert result["flood_hazard_available"] is False
+    assert set(result) == {
+        "buildings_available", "occupied", "building", "building_message"
+    }
 
 
 def test_site_screening_reports_unavailable_buildings_instead_of_clear_site(
@@ -350,7 +405,9 @@ def test_site_screening_reports_unavailable_buildings_instead_of_clear_site(
     assert result["buildings_available"] is False
     assert result["occupied"] is False
     assert "not imported" in result["building_message"]
-    assert "not" in result["flood_hazard_message"]
+    assert set(result) == {
+        "buildings_available", "occupied", "building", "building_message"
+    }
 
 
 def test_buildings_endpoint_validates_bbox(client):

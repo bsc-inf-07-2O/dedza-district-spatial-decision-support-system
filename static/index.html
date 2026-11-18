@@ -89,9 +89,8 @@
       <label><input type="checkbox" id="lyr-water" checked /> Mapped waterways</label>
       <label><input type="checkbox" id="lyr-priority" checked /> Priority screening cells</label>
       <label><input type="checkbox" id="lyr-buildings" disabled /> Detected building footprints</label>
-      <label><input type="checkbox" disabled /> Flood hazard (data unavailable)</label>
-      <label><input type="checkbox" disabled /> Terrain / slope (DEM not installed)</label>
-      <label><input type="checkbox" disabled /> Wetlands / land cover (not installed)</label>
+      <label><input type="checkbox" id="lyr-slope" disabled /> Terrain slope (Mapzen Terrain Tiles)</label>
+      <label><input type="checkbox" id="lyr-land-cover" disabled /> Land cover (ESA WorldCover 2021)</label>
       <p class="control-hint" id="building-layer-status" role="status">Checking building-footprint availability...</p>
       <p class="control-hint" id="environment-layer-status" role="status">Checking environmental-layer availability...</p>
     </section>
@@ -110,6 +109,8 @@
         <li><span class="swatch road"></span> Road network</li>
         <li><span class="swatch route"></span> Selected route estimate</li>
         <li><span class="swatch water"></span> Mapped waterway</li>
+        <li><span class="swatch environmental-slope"></span> Slope: low to high</li>
+        <li><span class="swatch environmental-landcover"></span> WorldCover land-cover classes</li>
       </ul>
     </section>
     <p class="footnote" id="sources"></p>
