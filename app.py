@@ -17,10 +17,13 @@ from rasterio.features import geometry_mask, rasterize
 from rasterio.transform import Affine
 from rasterio.windows import Window, from_bounds
 
+from scripts.site_constraints import point_in_geometry
+
 ROOT = Path(__file__).resolve().parent
 RAW = ROOT / "data" / "raw"
 DB_PATH = ROOT / "data" / "processed" / "dedza.sqlite"
 ROUTE_DB_PATH = ROOT / "data" / "processed" / "clip.duckdb"
+SITE_CONSTRAINT_DB_PATH = ROOT / "data" / "processed" / "site_constraints.sqlite"
 STATIC = ROOT / "static"
 ADM2_PATH = RAW / "MWI_ADM2_simplified.geojson"
 ADM3_PATH = RAW / "MWI_ADM3_simplified.geojson"
@@ -553,6 +556,77 @@ def valid_lon_lat(value: object) -> tuple[float, float] | None:
     return lon, lat
 
 
+def site_layer_status() -> dict:
+    status = {
+        "buildings": {
+            "available": False,
+            "count": 0,
+            "source": None,
+            "date": None,
+            "license": None,
+            "message": "Building footprints are not imported.",
+        },
+        "flood_hazard": {
+            "available": False,
+            "message": (
+                "No verified Dedza flood-hazard or flood-susceptibility layer is installed. "
+                "Mapped waterways are not flood evidence."
+            ),
+        },
+        "terrain": {
+            "available": False,
+            "message": "A DEM has not been installed for terrain or slope screening.",
+        },
+        "land_cover": {
+            "available": False,
+            "message": "A land-cover layer has not been installed.",
+        },
+    }
+    if not SITE_CONSTRAINT_DB_PATH.is_file():
+        return status
+
+    with sqlite3.connect(SITE_CONSTRAINT_DB_PATH) as con:
+        metadata = dict(con.execute("SELECT key, value FROM metadata"))
+        count = con.execute("SELECT COUNT(*) FROM buildings").fetchone()[0]
+    status["buildings"] = {
+        "available": True,
+        "count": count,
+        "source": metadata.get("buildings_source"),
+        "date": metadata.get("buildings_date"),
+        "license": metadata.get("buildings_license"),
+        "message": (
+            "Footprints are mapped detections and may be incomplete or out of date; "
+            "no footprint does not prove land is vacant."
+        ),
+    }
+    return status
+
+
+def building_at(lon: float, lat: float) -> dict | None:
+    if not SITE_CONSTRAINT_DB_PATH.is_file():
+        return None
+    with sqlite3.connect(SITE_CONSTRAINT_DB_PATH) as con:
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            """
+            SELECT id, height, confidence, geometry
+            FROM buildings
+            WHERE min_lon <= ? AND max_lon >= ?
+              AND min_lat <= ? AND max_lat >= ?
+            """,
+            (lon, lon, lat, lat),
+        ).fetchall()
+    for row in rows:
+        geometry = json.loads(row["geometry"])
+        if point_in_geometry((lon, lat), geometry):
+            return {
+                "id": row["id"],
+                "height": row["height"],
+                "confidence": row["confidence"],
+            }
+    return None
+
+
 def db() -> sqlite3.Connection:
     if not DB_PATH.exists():
         raise FileNotFoundError(
@@ -1004,6 +1078,99 @@ def traditional_authorities():
 @app.get("/api/boundary")
 def boundary():
     return jsonify(load_payloads()["boundary"])
+
+
+@app.get("/api/site-layers")
+def site_layers():
+    return jsonify(site_layer_status())
+
+
+@app.get("/api/buildings")
+def buildings():
+    parts = request.args.get("bbox", "").split(",")
+    if len(parts) != 4:
+        return jsonify({"error": "bbox must be west,south,east,north."}), 400
+    try:
+        west, south, east, north = (float(part) for part in parts)
+    except ValueError:
+        return jsonify({"error": "bbox coordinates must be numbers."}), 400
+    if (
+        not all(math.isfinite(value) for value in (west, south, east, north))
+        or not (-180 <= west < east <= 180)
+        or not (-90 <= south < north <= 90)
+    ):
+        return jsonify({"error": "bbox must be a valid geographic extent."}), 400
+
+    status = site_layer_status()["buildings"]
+    if not status["available"]:
+        return jsonify({
+            "type": "FeatureCollection",
+            "features": [],
+            "available": False,
+            "message": status["message"],
+        })
+
+    limit = 2000
+    with sqlite3.connect(SITE_CONSTRAINT_DB_PATH) as con:
+        rows = con.execute(
+            """
+            SELECT id, height, confidence, geometry
+            FROM buildings
+            WHERE max_lon >= ? AND min_lon <= ?
+              AND max_lat >= ? AND min_lat <= ?
+            ORDER BY id
+            LIMIT ?
+            """,
+            (west, east, south, north, limit + 1),
+        ).fetchall()
+    truncated = len(rows) > limit
+    features = [
+        {
+            "type": "Feature",
+            "properties": {
+                "id": row[0],
+                "height_m": row[1],
+                "confidence": row[2],
+            },
+            "geometry": json.loads(row[3]),
+        }
+        for row in rows[:limit]
+    ]
+    return jsonify({
+        "type": "FeatureCollection",
+        "features": features,
+        "available": True,
+        "truncated": truncated,
+        "source": status["source"],
+    })
+
+
+@app.post("/api/site-screening")
+def site_screening():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "A JSON request body is required."}), 400
+    coordinates = valid_lon_lat(data.get("coordinates"))
+    if coordinates is None:
+        return jsonify({"error": "coordinates must be a valid [longitude, latitude] pair."}), 400
+    lon, lat = coordinates
+    boundary_features = load_payloads()["boundary"]["features"]
+    if not any(
+        point_in_geometry(coordinates, feature["geometry"])
+        for feature in boundary_features
+    ):
+        return jsonify({"error": "Candidate site must be inside Dedza District."}), 400
+
+    layers = site_layer_status()
+    building = building_at(lon, lat) if layers["buildings"]["available"] else None
+    return jsonify({
+        "buildings_available": layers["buildings"]["available"],
+        "occupied": building is not None,
+        "building": building,
+        "building_message": layers["buildings"]["message"],
+        "flood_hazard_available": layers["flood_hazard"]["available"],
+        "flood_hazard_message": layers["flood_hazard"]["message"],
+    })
 
 
 @app.get("/api/facilities")

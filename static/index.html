@@ -88,6 +88,12 @@
       <label><input type="checkbox" id="lyr-roads" checked /> Roads</label>
       <label><input type="checkbox" id="lyr-water" checked /> Mapped waterways</label>
       <label><input type="checkbox" id="lyr-priority" checked /> Priority screening cells</label>
+      <label><input type="checkbox" id="lyr-buildings" disabled /> Detected building footprints</label>
+      <label><input type="checkbox" disabled /> Flood hazard (data unavailable)</label>
+      <label><input type="checkbox" disabled /> Terrain / slope (DEM not installed)</label>
+      <label><input type="checkbox" disabled /> Wetlands / land cover (not installed)</label>
+      <p class="control-hint" id="building-layer-status" role="status">Checking building-footprint availability...</p>
+      <p class="control-hint" id="environment-layer-status" role="status">Checking environmental-layer availability...</p>
     </section>
     <section>
       <h2>Legend</h2>
@@ -110,6 +116,15 @@
   </aside>
   <main>
     <div id="map">
+      <p id="map-status" class="map-status" role="status" aria-live="polite">Loading map data...</p>
+      <div id="scenario-notice" class="scenario-notice" role="alert" aria-live="assertive" hidden>
+        <span id="scenario-notice-icon" class="scenario-notice-icon" aria-hidden="true">i</span>
+        <div>
+          <strong id="scenario-notice-title">Candidate site notice</strong>
+          <p id="scenario-notice-message"></p>
+        </div>
+        <button type="button" id="close-scenario-notice" aria-label="Dismiss notification">×</button>
+      </div>
       <section id="route-results-panel" class="map-route-results" aria-labelledby="route-results-title" hidden>
         <h2 id="route-results-title">Route comparison</h2>
         <div id="route-options" class="route-options" role="group" aria-label="Available route choices"></div>

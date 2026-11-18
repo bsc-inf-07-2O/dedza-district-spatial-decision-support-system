@@ -1,8 +1,19 @@
+const mapStatus = document.getElementById("map-status");
+if (typeof L === "undefined") {
+  mapStatus.textContent = "The map library did not load. Check your internet connection or whether unpkg.com is blocked, then reload.";
+} else {
 const map = L.map("map", { zoomControl: true }).setView([-14.38, 34.33], 10);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+let baseTilesFailed = false;
+const baseMap = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: "&copy; OpenStreetMap contributors",
   maxZoom: 19,
-}).addTo(map);
+});
+baseMap.on("tileerror", () => {
+  baseTilesFailed = true;
+  mapStatus.hidden = false;
+  mapStatus.textContent = "Base map tiles could not be loaded. Check your internet connection; planning overlays may still be available.";
+});
+baseMap.addTo(map);
 
 const layers = {
   cells: L.layerGroup().addTo(map),
@@ -15,6 +26,7 @@ const layers = {
   water: L.layerGroup().addTo(map),
   priority: L.layerGroup().addTo(map),
   scenario: L.layerGroup().addTo(map),
+  buildings: L.layerGroup(),
 };
 
 const selectedBoundary = L.geoJSON(null, {
@@ -86,7 +98,7 @@ function asFeature(geometry, properties = {}) {
 }
 
 async function init() {
-  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData] = await Promise.all([
+  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers] = await Promise.all([
     fetchJson("/api/summary"),
     fetchJson("/api/boundary"),
     fetchJson("/api/facilities"),
@@ -98,6 +110,7 @@ async function init() {
     fetchJson("/api/roads"),
     fetchJson("/api/waterways"),
     fetchJson("/api/traditional-authorities"),
+    fetchJson("/api/site-layers"),
   ]);
 
   const taFeatures = taData.features;
@@ -123,6 +136,8 @@ async function init() {
     scenarios: [],
     nextScenarioId: 1,
     placingScenario: false,
+    siteScreeningRequestId: 0,
+    siteScreeningPending: false,
     scenarioResultsCollapsed: false,
   };
   const areaStatus = document.getElementById("area-status");
@@ -154,9 +169,112 @@ async function init() {
   const scenarioCandidateList = document.getElementById("scenario-candidate-list");
   const scenarioResultsSummary = document.getElementById("scenario-results-summary");
   const scenarioResultsToggle = document.getElementById("toggle-scenario-results");
+  const scenarioNotice = document.getElementById("scenario-notice");
+  const scenarioNoticeTitle = document.getElementById("scenario-notice-title");
+  const scenarioNoticeMessage = document.getElementById("scenario-notice-message");
+  const scenarioNoticeIcon = document.getElementById("scenario-notice-icon");
+  const closeScenarioNotice = document.getElementById("close-scenario-notice");
+  const buildingToggle = document.getElementById("lyr-buildings");
+  const buildingLayerStatus = document.getElementById("building-layer-status");
+  const environmentLayerStatus = document.getElementById("environment-layer-status");
   L.DomEvent.disableClickPropagation(scenarioResults);
   L.DomEvent.disableScrollPropagation(scenarioResults);
   let schoolRadiusKm = Number(schoolRadiusInput.value) || 5;
+  const buildingLayer = siteLayers.buildings;
+  buildingToggle.disabled = !buildingLayer.available;
+  buildingToggle.title = buildingLayer.available
+    ? "Show detected footprints; coverage may be incomplete or out of date."
+    : buildingLayer.message;
+  buildingLayerStatus.textContent = buildingLayer.available
+    ? `${buildingLayer.count.toLocaleString()} detected footprints · ${buildingLayer.source} (${buildingLayer.date}; ${buildingLayer.license}). ${buildingLayer.message}`
+    : `${buildingLayer.message} Run python scripts/import_buildings.py to fetch the Malawi tiles and clip them to Dedza.`;
+  environmentLayerStatus.textContent = [
+    `Flood: ${siteLayers.flood_hazard.message}`,
+    `Terrain: ${siteLayers.terrain.message}`,
+    `Land cover: ${siteLayers.land_cover.message}`,
+  ].join(" ");
+  let buildingRequestId = 0;
+  let buildingLoadTimer = null;
+
+  let scenarioNoticeTimer = null;
+  function showScenarioNotice(title, message, kind = "warning", temporary = false) {
+    clearTimeout(scenarioNoticeTimer);
+    scenarioNotice.className = `scenario-notice ${kind}`;
+    scenarioNotice.hidden = false;
+    scenarioNoticeTitle.textContent = title;
+    scenarioNoticeMessage.textContent = message;
+    scenarioNoticeIcon.textContent = kind === "error" ? "!" : kind === "success" ? "✓" : "i";
+    if (temporary) {
+      scenarioNoticeTimer = setTimeout(() => {
+        scenarioNotice.hidden = true;
+      }, 7000);
+    }
+  }
+  closeScenarioNotice.addEventListener("click", () => {
+    clearTimeout(scenarioNoticeTimer);
+    scenarioNotice.hidden = true;
+  });
+
+  async function loadBuildingFeatures() {
+    const requestId = ++buildingRequestId;
+    layers.buildings.clearLayers();
+    if (!buildingToggle.checked || !buildingLayer.available) return;
+    if (map.getZoom() < 12) {
+      buildingLayerStatus.textContent = "Zoom in to level 12 or closer to display detected building footprints.";
+      return;
+    }
+    const bounds = map.getBounds();
+    const bbox = [
+      bounds.getWest(),
+      bounds.getSouth(),
+      bounds.getEast(),
+      bounds.getNorth(),
+    ].join(",");
+    buildingLayerStatus.textContent = "Loading building footprints for the visible map area...";
+    try {
+      const data = await fetchJson(`/api/buildings?bbox=${encodeURIComponent(bbox)}`);
+      if (requestId !== buildingRequestId) return;
+      L.geoJSON(data, {
+        style: {
+          color: "#7b2cbf",
+          weight: 1,
+          fillColor: "#c77dff",
+          fillOpacity: 0.48,
+        },
+        onEachFeature(feature, layer) {
+          const properties = feature.properties || {};
+          const details = document.createElement("div");
+          details.textContent = `Detected building${properties.confidence == null ? "" : ` · confidence ${Math.round(properties.confidence * 100)}%`}${properties.height_m == null || properties.height_m < 0 ? "" : ` · estimated height ${properties.height_m} m`}`;
+          layer.bindPopup(details);
+        },
+      }).addTo(layers.buildings);
+      buildingLayerStatus.textContent = data.truncated
+        ? `Showing the first ${data.features.length.toLocaleString()} footprints in this view. Zoom in further to see more.`
+        : `${data.features.length.toLocaleString()} detected footprints shown in this view. Absence of a footprint does not prove land is vacant.`;
+    } catch (error) {
+      if (requestId === buildingRequestId) {
+        buildingLayerStatus.textContent = `Could not load building footprints: ${error.message}`;
+      }
+    }
+  }
+
+  function scheduleBuildingLoad() {
+    clearTimeout(buildingLoadTimer);
+    buildingLoadTimer = setTimeout(loadBuildingFeatures, 200);
+  }
+
+  async function screenCandidateSite(coordinates) {
+    const response = await fetch("/api/site-screening", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ coordinates }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || `Site screening failed (${response.status}).`);
+    }
+    return result;
+  }
   const routeFacilities = [
     ...facilities.map((facility) => ({
       name: facility.name,
@@ -584,7 +702,13 @@ async function init() {
       popupTitle.textContent = `Candidate ${candidate.id} · ${label}`;
       const popupRadius = document.createElement("div");
       popupRadius.textContent = `${candidate.radius} km straight-line radius`;
-      popup.append(popupTitle, popupRadius);
+      const occupancy = document.createElement("div");
+      occupancy.textContent = candidate.siteScreening.buildings_available
+        ? "No detected footprint contains the candidate point; this does not confirm the parcel is vacant."
+        : "Building footprints are unavailable; occupancy was not screened.";
+      const hazard = document.createElement("div");
+      hazard.textContent = candidate.siteScreening.flood_hazard_message;
+      popup.append(popupTitle, popupRadius, occupancy, hazard);
       if (candidate.populationEstimate) {
         const population = document.createElement("div");
         population.textContent = `${Math.round(candidate.populationEstimate.additional_population_estimate).toLocaleString()} estimated additional residents`;
@@ -604,6 +728,16 @@ async function init() {
         candidate.marker?.openPopup();
       });
       card.appendChild(focus);
+
+      const siteScreening = document.createElement("p");
+      siteScreening.className = "scenario-screening-note";
+      siteScreening.textContent = candidate.siteScreening.buildings_available
+        ? "No detected building footprint contains this point. This does not confirm the parcel is vacant."
+        : "Building footprints are not installed; occupancy was not screened.";
+      const hazardScreening = document.createElement("p");
+      hazardScreening.className = "scenario-screening-note";
+      hazardScreening.textContent = candidate.siteScreening.flood_hazard_message;
+      card.append(siteScreening, hazardScreening);
 
       if (candidate.loading) {
         const loading = document.createElement("p");
@@ -829,6 +963,15 @@ async function init() {
     rows.push(["method", areaLabel, "population coverage", "Raster cells assigned to existing 3 km straight-line health-access classes; not network travel or school access"]);
     rows.push(["source", areaLabel, "health baseline", "Existing MOH facility dataset used to derive the 3 km access grid"]);
     rows.push(["source", areaLabel, "2026 health reference", "ArcGIS Malawi Health 2026 FeatureServer; separate comparison layer; license/provenance requires confirmation"]);
+    rows.push([
+      "source",
+      areaLabel,
+      "building footprints",
+      siteLayers.buildings.available
+        ? `${siteLayers.buildings.source}; ${siteLayers.buildings.date}; ${siteLayers.buildings.license}`
+        : "Unavailable; occupancy not screened",
+    ]);
+    rows.push(["hazard assessment", areaLabel, "flood", siteLayers.flood_hazard.message]);
     schoolCoverage.forEach(([threshold, count]) => {
       rows.push(["school coverage", areaLabel, `settlements within ${threshold} km`, `${count}/${active.settlements.length}`]);
     });
@@ -837,6 +980,15 @@ async function init() {
       const label = `candidate ${candidate.id}`;
       const metrics = getScenarioMetrics(active, candidate);
       rows.push(["scenario", areaLabel, `${label} facility type`, candidate.type === "school" ? "School" : "Health centre"]);
+      rows.push([
+        "site screening",
+        areaLabel,
+        `${label} detected building occupancy`,
+        candidate.siteScreening.buildings_available
+          ? "No detected footprint contains the candidate point; vacancy not confirmed"
+          : "Not screened; building data unavailable",
+      ]);
+      rows.push(["site screening", areaLabel, `${label} flood hazard`, candidate.siteScreening.flood_hazard_message]);
       rows.push(["scenario", areaLabel, `${label} radius km`, candidate.radius]);
       rows.push(["scenario", areaLabel, `${label} additional settlements in selected geography`, metrics.gain]);
       if (candidate.populationEstimate) {
@@ -1417,6 +1569,16 @@ async function init() {
     placeScenarioButton.textContent = state.placingScenario
       ? "Cancel placement"
       : state.scenarios.length ? "Add another site" : "Add site on map";
+    if (state.placingScenario) {
+      showScenarioNotice(
+        "Place candidate site",
+        "Click inside the selected district or Traditional Authority. Detected building footprints will block the point.",
+        "warning",
+        false
+      );
+    } else {
+      scenarioNotice.hidden = true;
+    }
     render(activeData());
   });
   scenarioResultsToggle.addEventListener("click", () => {
@@ -1425,6 +1587,10 @@ async function init() {
   });
   clearScenarioButton.addEventListener("click", () => {
     const clearedCandidates = state.scenarios.length > 0;
+    state.siteScreeningRequestId += 1;
+    state.siteScreeningPending = false;
+    clearTimeout(scenarioNoticeTimer);
+    scenarioNotice.hidden = true;
     state.scenarios = [];
     state.nextScenarioId = 1;
     state.placingScenario = false;
@@ -1451,9 +1617,9 @@ async function init() {
       refreshScenarioEstimates();
     }
   });
-  map.getContainer().addEventListener("click", (event) => {
+  map.getContainer().addEventListener("click", async (event) => {
     if (event.target instanceof Element && event.target.closest(".map-scenario-results, .map-route-results")) return;
-    if (!state.placingScenario) return;
+    if (!state.placingScenario || state.siteScreeningPending) return;
     L.DomEvent.stopPropagation(event);
     L.DomEvent.preventDefault(event);
     const latlng = map.mouseEventToLatLng(event);
@@ -1462,12 +1628,42 @@ async function init() {
       ? state.areas.some((area) => turf.booleanPointInPolygon(point, area))
       : boundary.features.some((feature) => turf.booleanPointInPolygon(point, feature));
     if (!inScope) {
-      scenarioStatus.textContent = "Place the proposed facility inside the selected geography.";
+      const message = "Place the proposed facility inside the selected district or Traditional Authority.";
+      scenarioStatus.textContent = message;
+      showScenarioNotice("Candidate outside selected area", message, "error", true);
       return;
     }
     const radius = Number(scenarioRadiusInput.value);
     if (!Number.isFinite(radius) || radius < 1 || radius > 50) {
-      scenarioStatus.textContent = "Enter a scenario radius between 1 and 50 km.";
+      const message = "Enter a scenario radius between 1 and 50 km.";
+      scenarioStatus.textContent = message;
+      showScenarioNotice("Invalid radius", message, "error", true);
+      return;
+    }
+    const checkingMessage = "Checking building occupancy and available environmental data...";
+    scenarioStatus.textContent = checkingMessage;
+    showScenarioNotice("Screening candidate site", checkingMessage, "warning", false);
+    const requestId = ++state.siteScreeningRequestId;
+    state.siteScreeningPending = true;
+    let siteScreening;
+    try {
+      siteScreening = await screenCandidateSite(point.geometry.coordinates);
+    } catch (error) {
+      if (requestId === state.siteScreeningRequestId) {
+        scenarioStatus.textContent = `Could not screen candidate site: ${error.message}`;
+        showScenarioNotice("Screening unavailable", `Could not screen candidate site: ${error.message}`, "error", true);
+      }
+      return;
+    } finally {
+      if (requestId === state.siteScreeningRequestId) {
+        state.siteScreeningPending = false;
+      }
+    }
+    if (requestId !== state.siteScreeningRequestId || !state.placingScenario) return;
+    if (siteScreening.occupied) {
+      const message = "Not added: the candidate point overlaps a detected building footprint. Choose another point.";
+      scenarioStatus.textContent = message;
+      showScenarioNotice("Building occupies this site", message, "error", true);
       return;
     }
     const candidate = {
@@ -1475,12 +1671,23 @@ async function init() {
       point,
       type: scenarioTypeInput.value,
       radius,
+      siteScreening,
       loading: true,
     };
     state.scenarios.push(candidate);
     state.placingScenario = false;
     state.scenarioResultsCollapsed = false;
     placeScenarioButton.textContent = "Add another site";
+    const successMessage = siteScreening.buildings_available
+      ? "Candidate added. No detected building footprint contains this point; parcel vacancy still needs field verification."
+      : "Candidate added, but building occupancy could not be screened because building data is unavailable.";
+    scenarioStatus.textContent = successMessage;
+    showScenarioNotice(
+      siteScreening.buildings_available ? "Candidate accepted for analysis" : "Candidate added with limited screening",
+      successMessage,
+      siteScreening.buildings_available ? "success" : "warning",
+      true
+    );
     render(activeData());
     estimateScenarioCandidate(candidate);
   }, true);
@@ -1498,6 +1705,7 @@ async function init() {
   document.getElementById("sources").textContent = `${summary.meta.sources}; ArcGIS Malawi Health 2026 FeatureServer (separate reference layer); WorldPop 2025 R2025A v1 (CC BY 4.0)`;
   renderTAComparison(buildTAComparison());
   selectDistrict();
+  if (!baseTilesFailed) mapStatus.hidden = true;
 
   document.querySelectorAll(".analysis-tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -1528,9 +1736,15 @@ async function init() {
   bind("lyr-roads", layers.roads);
   bind("lyr-water", layers.water);
   bind("lyr-priority", layers.priority);
+  bind("lyr-buildings", layers.buildings);
+  buildingToggle.addEventListener("change", loadBuildingFeatures);
+  map.on("moveend", scheduleBuildingLoad);
 }
 
 init().catch((err) => {
+  mapStatus.hidden = false;
+  mapStatus.textContent = `Could not load the Dedza planning layers: ${err.message}`;
   document.getElementById("kpis").innerHTML =
     `<p>Could not load the Dedza planning layers: ${escapeHtml(err.message)}</p>`;
 });
+}

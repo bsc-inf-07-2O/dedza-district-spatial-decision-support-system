@@ -2,3 +2,4 @@ flask>=3.0
 duckdb>=1.2
 rasterio>=1.4
 pytest>=8.0
+shapely>=2.0

@@ -256,6 +256,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .scenario-candidate-title:hover { text-decoration: underline; }
 .scenario-candidate strong { display: block; margin-top: 4px; font-size: 13px; }
 .scenario-candidate p { margin: 3px 0 0; color: var(--results-panel-muted); font-size: 10px; line-height: 1.35; }
+.scenario-candidate .scenario-screening-note { padding-left: 6px; border-left: 2px solid #d6a542; }
 .scenario-candidate .scenario-error { color: #9f2d20; }
 .scenario-ta-list { margin: 4px 0 0; padding-left: 15px; color: var(--results-panel-muted); font-size: 10px; line-height: 1.35; }
 .scenario-candidate .scenario-road-summary { margin-top: 6px; color: var(--results-panel-ink); font-weight: 700; }
@@ -342,6 +343,86 @@ label { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 
 
 main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #map { position: relative; flex: 1; min-height: 420px; }
+.map-status {
+  position: absolute;
+  z-index: 1200;
+  top: 12px;
+  left: 50%;
+  max-width: calc(100% - 24px);
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid #9a5c1c;
+  border-radius: 4px;
+  background: #fff4d6;
+  color: #442b12;
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.map-status[hidden] { display: none; }
+.scenario-notice {
+  position: absolute;
+  z-index: 1300;
+  top: 16px;
+  left: 16px;
+  width: min(620px, calc(100% - 32px));
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 10px 12px 12px;
+  border: 3px solid #e9c46a;
+  border-radius: 8px;
+  background: #fff4ce;
+  color: #3d2c10;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.48);
+  font-size: 15px;
+  line-height: 1.35;
+}
+.scenario-notice[hidden] { display: none; }
+.scenario-notice.error {
+  border-color: #c93424;
+  background: #fff0ed;
+  color: #6e1d16;
+}
+.scenario-notice.success {
+  border-color: #23806f;
+  background: #e4f7f1;
+  color: #173b33;
+}
+.scenario-notice-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e9c46a;
+  color: #3d2c10;
+  font-size: 26px;
+  font-weight: 800;
+}
+.scenario-notice.error .scenario-notice-icon {
+  background: #c93424;
+  color: #fff;
+}
+.scenario-notice.success .scenario-notice-icon {
+  background: #23806f;
+  color: #fff;
+}
+.scenario-notice strong { display: block; font-size: 17px; }
+.scenario-notice p { margin: 3px 0 0; font-weight: 600; }
+.scenario-notice button {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(61, 44, 16, 0.12);
+  color: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+.scenario-notice button:hover { background: rgba(61, 44, 16, 0.22); }
 .map-route-results {
   position: absolute;
   z-index: 1100;

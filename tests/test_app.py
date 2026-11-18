@@ -1,9 +1,15 @@
+import json
+import sqlite3
+
 import pytest
+import app as app_module
 
 from app import (
     app,
+    building_at,
     calculate_road_route,
     db,
+    point_in_geometry,
     estimate_scenario_road_access,
     haversine_km,
     load_payloads,
@@ -242,3 +248,145 @@ def test_scenario_population_endpoint_rejects_invalid_candidate(payload, message
 
     assert response.status_code == 400
     assert message in response.get_json()["error"]
+
+
+def _unserved_cell_point():
+    con = db()
+    try:
+        site = con.execute(
+            "SELECT lon, lat FROM cells WHERE coverage = 'unserved' LIMIT 1"
+        ).fetchone()
+        return site["lon"], site["lat"]
+    finally:
+        con.close()
+
+
+def _write_site_constraints(path, point):
+    lon, lat = point
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [[
+            [lon - 0.001, lat - 0.001],
+            [lon + 0.001, lat - 0.001],
+            [lon + 0.001, lat + 0.001],
+            [lon - 0.001, lat + 0.001],
+            [lon - 0.001, lat - 0.001],
+        ]],
+    }
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE buildings (
+                id INTEGER PRIMARY KEY,
+                min_lon REAL,
+                min_lat REAL,
+                max_lon REAL,
+                max_lat REAL,
+                height REAL,
+                confidence REAL,
+                geometry TEXT
+            );
+            """
+        )
+        con.executemany(
+            "INSERT INTO metadata VALUES (?, ?)",
+            [
+                ("buildings_source", "test"),
+                ("buildings_date", "2026-01-01"),
+                ("buildings_license", "test"),
+            ],
+        )
+        con.execute(
+            """
+            INSERT INTO buildings (
+                min_lon, min_lat, max_lon, max_lat, height, confidence, geometry
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                lon - 0.001,
+                lat - 0.001,
+                lon + 0.001,
+                lat + 0.001,
+                -1,
+                0.9,
+                json.dumps(geometry),
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_site_screening_blocks_candidate_inside_detected_building(client, tmp_path, monkeypatch):
+    point = _unserved_cell_point()
+    constraints_path = tmp_path / "site_constraints.sqlite"
+    _write_site_constraints(constraints_path, point)
+    monkeypatch.setattr(app_module, "SITE_CONSTRAINT_DB_PATH", constraints_path)
+    assert building_at(*point) is not None
+
+    response = client.post("/api/site-screening", json={"coordinates": list(point)})
+
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["buildings_available"] is True
+    assert result["occupied"] is True, result
+    assert result["flood_hazard_available"] is False
+
+
+def test_site_screening_reports_unavailable_buildings_instead_of_clear_site(
+    client, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(app_module, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite")
+
+    response = client.post(
+        "/api/site-screening",
+        json={"coordinates": list(_unserved_cell_point())},
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["buildings_available"] is False
+    assert result["occupied"] is False
+    assert "not imported" in result["building_message"]
+    assert "not" in result["flood_hazard_message"]
+
+
+def test_buildings_endpoint_validates_bbox(client):
+    response = client.get("/api/buildings?bbox=0,0,1")
+
+    assert response.status_code == 400
+    assert "bbox" in response.get_json()["error"]
+
+
+def test_buildings_endpoint_returns_features_in_view(client, tmp_path, monkeypatch):
+    point = _unserved_cell_point()
+    constraints_path = tmp_path / "site_constraints.sqlite"
+    _write_site_constraints(constraints_path, point)
+    monkeypatch.setattr(app_module, "SITE_CONSTRAINT_DB_PATH", constraints_path)
+    lon, lat = point
+
+    response = client.get(
+        f"/api/buildings?bbox={lon - 0.01},{lat - 0.01},{lon + 0.01},{lat + 0.01}"
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["available"] is True
+    assert len(result["features"]) == 1
+    assert result["features"][0]["properties"]["confidence"] == pytest.approx(0.9)
+
+
+def test_point_in_geometry_respects_polygon_holes():
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [
+            [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]],
+            [[1, 1], [3, 1], [3, 3], [1, 3], [1, 1]],
+        ],
+    }
+
+    assert point_in_geometry((0.5, 0.5), geometry)
+    assert not point_in_geometry((2, 2), geometry)
+    assert point_in_geometry((1, 2), geometry)
