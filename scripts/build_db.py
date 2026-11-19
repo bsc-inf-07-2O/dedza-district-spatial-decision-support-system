@@ -134,6 +134,9 @@ def main() -> None:
     )
     n_fac = con.execute("SELECT COUNT(*) FROM facilities").fetchone()[0]
     print(f"Facilities in Dedza: {n_fac}")
+    if n_fac == 0:
+        con.close()
+        raise RuntimeError("No health facilities fall inside Dedza; coverage analysis cannot be built.")
 
     clip_db = PROCESSED / "clip.duckdb"
     envelope = f"ST_MakeEnvelope({xmin - 0.02}, {ymin - 0.02}, {xmax + 0.02}, {ymax + 0.02})"
@@ -288,16 +291,49 @@ def main() -> None:
         """
     )
 
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE cell_analysis AS
+        WITH classified AS (
+            SELECT *,
+                   CASE
+                       WHEN dist_facility_m IS NULL THEN 'unserved'
+                       WHEN dist_facility_m <= 5000 THEN 'served'
+                       WHEN dist_facility_m <= 8000 THEN 'underserved'
+                       ELSE 'unserved'
+                   END AS coverage,
+                   CASE
+                       WHEN road_km >= 4 THEN 'good'
+                       WHEN road_km >= 1.5 THEN 'limited'
+                       ELSE 'poor'
+                   END AS road_access,
+                   CASE
+                       WHEN water_km >= 2 THEN 'good'
+                       WHEN water_km >= 0.5 THEN 'limited'
+                       ELSE 'poor'
+                   END AS water_access
+            FROM cell_stats
+        )
+        SELECT *,
+               (
+                   LEAST(COALESCE(dist_facility_m, 16000) / 8000.0, 2.0) * 0.55
+                   + (1 - LEAST(road_km / 8.0, 1.0)) * 0.25
+                   + (1 - LEAST(water_km / 4.0, 1.0)) * 0.20
+               ) * CASE WHEN coverage = 'served' THEN 0.35 ELSE 1.0 END AS priority_score
+        FROM classified
+        """
+    )
+
     stats = con.execute(
         """
         SELECT
             COUNT(*) AS n_cells,
-            SUM(CASE WHEN dist_facility_m <= 5000 THEN 1 ELSE 0 END) AS served,
-            SUM(CASE WHEN dist_facility_m > 5000 AND dist_facility_m <= 8000 THEN 1 ELSE 0 END) AS underserved,
-            SUM(CASE WHEN dist_facility_m > 8000 THEN 1 ELSE 0 END) AS unserved,
+            SUM(CASE WHEN coverage = 'served' THEN 1 ELSE 0 END) AS served,
+            SUM(CASE WHEN coverage = 'underserved' THEN 1 ELSE 0 END) AS underserved,
+            SUM(CASE WHEN coverage = 'unserved' THEN 1 ELSE 0 END) AS unserved,
             AVG(dist_facility_m) AS avg_dist,
             SUM(area_km2) AS area
-        FROM cell_stats
+        FROM cell_analysis
         """
     ).fetchone()
     print("Grid stats:", stats)
@@ -414,30 +450,15 @@ def main() -> None:
     cell_rows = con.execute(
         """
         SELECT cell_id, lon, lat, area_km2, dist_facility_m, road_km, water_km,
-               facilities_in_cell, ST_AsGeoJSON(geom)
-        FROM cell_stats
+               facilities_in_cell, coverage, road_access, water_access,
+               priority_score, ST_AsGeoJSON(geom)
+        FROM cell_analysis
         """
     ).fetchall()
-    recs = []
-    for cell_id, lon, lat, area_km2, dist_m, road_km, water_km, n_in, gj in cell_rows:
-        dist_m = float(dist_m or 0)
-        road_km = float(road_km or 0)
-        water_km = float(water_km or 0)
-        if dist_m <= 5000:
-            coverage = "served"
-        elif dist_m <= 8000:
-            coverage = "underserved"
-        else:
-            coverage = "unserved"
-        road_access = "good" if road_km >= 4 else ("limited" if road_km >= 1.5 else "poor")
-        water_access = "good" if water_km >= 2 else ("limited" if water_km >= 0.5 else "poor")
-        priority = (
-            min(dist_m / 8000.0, 2.0) * 0.55
-            + (1 - min(road_km / 8.0, 1)) * 0.25
-            + (1 - min(water_km / 4.0, 1)) * 0.20
-        )
-        if coverage == "served":
-            priority *= 0.35
+    for (
+        cell_id, lon, lat, area_km2, dist_m, road_km, water_km, n_in,
+        coverage, road_access, water_access, priority, gj,
+    ) in cell_rows:
         cur.execute(
             """INSERT INTO cells (
                 cell_id, lon, lat, area_km2, dist_facility_m, road_km, water_km,
@@ -445,36 +466,60 @@ def main() -> None:
                 priority_score, geojson
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                int(cell_id), float(lon), float(lat), float(area_km2), dist_m,
-                road_km, water_km, int(n_in), coverage, road_access, water_access,
-                float(priority), gj,
+                int(cell_id), float(lon), float(lat), float(area_km2),
+                None if dist_m is None else float(dist_m),
+                float(road_km), float(water_km), int(n_in),
+                coverage, road_access, water_access, float(priority), gj,
             ),
         )
-        recs.append((priority, cell_id, lon, lat, coverage, dist_m, road_km, water_km))
 
-    recs.sort(reverse=True)
-    for rank, (priority, cell_id, lon, lat, coverage, dist_m, road_km, water_km) in enumerate(recs[:12], start=1):
-        actions = []
-        if dist_m > 8000:
-            actions.append("Site a new health post or outreach clinic")
-        elif dist_m > 5000:
-            actions.append("Upgrade outreach / mobile clinic coverage")
-        if road_km < 1.5:
-            actions.append("Prioritise feeder-road improvement")
-        if water_km < 0.5:
-            actions.append("Assess WASH / borehole need (far from mapped waterways)")
-        if not actions:
-            actions.append("Monitor service quality and staffing")
+    recommendation_rows = con.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                ROW_NUMBER() OVER (ORDER BY priority_score DESC, cell_id DESC) AS rank,
+                cell_id, lon, lat, coverage, dist_facility_m, road_km, water_km,
+                priority_score,
+                CASE
+                    WHEN dist_facility_m IS NULL OR dist_facility_m > 8000
+                        THEN 'Site a new health post or outreach clinic'
+                    WHEN dist_facility_m > 5000
+                        THEN 'Upgrade outreach / mobile clinic coverage'
+                    ELSE ''
+                END AS health_action,
+                CASE WHEN road_km < 1.5
+                    THEN 'Prioritise feeder-road improvement' ELSE '' END AS road_action,
+                CASE WHEN water_km < 0.5
+                    THEN 'Assess WASH / borehole need (far from mapped waterways)'
+                    ELSE '' END AS water_action
+            FROM cell_analysis
+        )
+        SELECT
+            rank, cell_id, lon, lat, coverage,
+            ROUND(dist_facility_m / 1000.0, 2),
+            ROUND(road_km, 2), ROUND(water_km, 2), ROUND(priority_score, 3),
+            CASE
+                WHEN health_action = '' AND road_action = '' AND water_action = ''
+                    THEN 'Monitor service quality and staffing'
+                ELSE CONCAT_WS(
+                    '; ',
+                    NULLIF(health_action, ''),
+                    NULLIF(road_action, ''),
+                    NULLIF(water_action, '')
+                )
+            END AS action
+        FROM ranked
+        WHERE rank <= 12
+        ORDER BY rank
+        """
+    ).fetchall()
+    for recommendation in recommendation_rows:
         cur.execute(
             """INSERT INTO recommendations (
                 rank, cell_id, lon, lat, coverage, dist_facility_km, road_km, water_km,
                 priority_score, action
             ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (
-                rank, int(cell_id), float(lon), float(lat), coverage,
-                round(dist_m / 1000, 2), round(road_km, 2), round(water_km, 2),
-                round(priority, 3), "; ".join(actions),
-            ),
+            recommendation,
         )
 
     n_cells, served, underserved, unserved, avg_dist, area = stats

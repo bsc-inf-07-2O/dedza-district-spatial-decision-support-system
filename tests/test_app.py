@@ -109,6 +109,103 @@ def test_summary_endpoint_returns_metrics(client):
     assert payload["coverage"]
 
 
+def test_gap_analysis_reclassifies_cells_and_aggregates_in_sql(
+    client, tmp_path, monkeypatch
+):
+    database_path = tmp_path / "gap-analysis.sqlite"
+    con = sqlite3.connect(database_path)
+    con.execute(
+        "CREATE TABLE cells (cell_id INTEGER, dist_facility_m REAL, area_km2 REAL)"
+    )
+    con.executemany(
+        "INSERT INTO cells VALUES (?, ?, ?)",
+        [
+            (1, 3000, 1.0),
+            (2, 5000, 2.0),
+            (3, 8000, 3.0),
+            (4, 10000, 4.0),
+            (5, None, 5.0),
+        ],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(app_module, "DB_PATH", database_path)
+
+    response = client.get("/api/gap-analysis?served_km=3&underserved_km=8")
+
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["served_km"] == 3
+    assert result["underserved_km"] == 8
+    assert result["coverage"] == {
+        "served": {"cells": 1, "km2": 1.0},
+        "underserved": {"cells": 2, "km2": 5.0},
+        "unserved": {"cells": 2, "km2": 9.0},
+    }
+    assert result["cells"] == [
+        {"cell_id": 1, "coverage": "served"},
+        {"cell_id": 2, "coverage": "underserved"},
+        {"cell_id": 3, "coverage": "underserved"},
+        {"cell_id": 4, "coverage": "unserved"},
+        {"cell_id": 5, "coverage": "unserved"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        ("served_km=abc", "numbers"),
+        ("served_km=5&underserved_km=5", "Need"),
+        ("served_km=nan&underserved_km=8", "Need"),
+        ("served_km=5&underserved_km=51", "Need"),
+    ],
+)
+def test_gap_analysis_rejects_invalid_thresholds(client, query, message):
+    response = client.get(f"/api/gap-analysis?{query}")
+
+    assert response.status_code == 400
+    assert message in response.get_json()["error"]
+
+
+def test_database_contains_sql_derived_coverage_and_ranked_recommendations():
+    con = db()
+    try:
+        mismatched_cells = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM cells
+            WHERE coverage != CASE
+                WHEN dist_facility_m IS NULL THEN 'unserved'
+                WHEN dist_facility_m <= 5000 THEN 'served'
+                WHEN dist_facility_m <= 8000 THEN 'underserved'
+                ELSE 'unserved'
+            END
+            """
+        ).fetchone()[0]
+        expected_recommendations = [
+            row["cell_id"]
+            for row in con.execute(
+                """
+                SELECT cell_id
+                FROM cells
+                ORDER BY priority_score DESC, cell_id DESC
+                LIMIT 12
+                """
+            )
+        ]
+        stored_recommendations = [
+            row["cell_id"]
+            for row in con.execute(
+                "SELECT cell_id FROM recommendations ORDER BY rank"
+            )
+        ]
+    finally:
+        con.close()
+
+    assert mismatched_cells == 0
+    assert stored_recommendations == expected_recommendations
+
+
 def test_access_summary_endpoint(client):
     response = client.get("/api/access-summary")
     assert response.status_code == 200

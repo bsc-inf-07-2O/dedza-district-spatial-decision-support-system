@@ -110,7 +110,7 @@ function asFeature(geometry, properties = {}) {
 }
 
 async function init() {
-  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers] = await Promise.all([
+  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers, gapAnalysis] = await Promise.all([
     fetchJson("/api/summary"),
     fetchJson("/api/boundary"),
     fetchJson("/api/facilities"),
@@ -123,6 +123,7 @@ async function init() {
     fetchJson("/api/waterways"),
     fetchJson("/api/traditional-authorities"),
     fetchJson("/api/site-layers"),
+    fetchJson("/api/gap-analysis"),
   ]);
 
   const taFeatures = taData.features;
@@ -151,6 +152,10 @@ async function init() {
     siteScreeningRequestId: 0,
     siteScreeningPending: false,
     scenarioResultsCollapsed: false,
+    gapCoverage: new Map(gapAnalysis.cells.map((cell) => [cell.cell_id, cell.coverage])),
+    gapServedKm: gapAnalysis.served_km,
+    gapUnderservedKm: gapAnalysis.underserved_km,
+    gapAnalysisRequestId: 0,
   };
   const areaStatus = document.getElementById("area-status");
   const taSearch = document.getElementById("ta-search");
@@ -191,6 +196,15 @@ async function init() {
   const landCoverToggle = document.getElementById("lyr-land-cover");
   const buildingLayerStatus = document.getElementById("building-layer-status");
   const environmentLayerStatus = document.getElementById("environment-layer-status");
+  const gapServedInput = document.getElementById("gap-served-km");
+  const gapUnderservedInput = document.getElementById("gap-underserved-km");
+  const gapServedValue = document.getElementById("gap-served-value");
+  const gapUnderservedValue = document.getElementById("gap-underserved-value");
+  const gapAnalysisResults = document.getElementById("gap-analysis-results");
+  gapServedInput.value = String(gapAnalysis.served_km);
+  gapUnderservedInput.value = String(gapAnalysis.underserved_km);
+  gapUnderservedInput.min = String(gapAnalysis.served_km + 1);
+  renderGapAnalysisSummary(gapAnalysis);
   L.DomEvent.disableClickPropagation(scenarioResults);
   L.DomEvent.disableScrollPropagation(scenarioResults);
   let schoolRadiusKm = Number(schoolRadiusInput.value) || 5;
@@ -1272,6 +1286,68 @@ async function init() {
     return prompts.length ? prompts.join("; ") : "Review service quality and staffing";
   }
 
+  function renderGapAnalysisSummary(result) {
+    state.gapServedKm = result.served_km;
+    state.gapUnderservedKm = result.underserved_km;
+    state.gapCoverage = new Map(
+      result.cells.map((cell) => [Number(cell.cell_id), cell.coverage])
+    );
+    gapServedInput.value = String(result.served_km);
+    gapUnderservedInput.value = String(result.underserved_km);
+    gapUnderservedInput.min = String(result.served_km + 1);
+    gapServedValue.textContent = `${result.served_km} km`;
+    gapUnderservedValue.textContent = `${result.underserved_km} km`;
+    document.getElementById("legend-served").textContent =
+      `Served (≤ ${result.served_km} km)`;
+    document.getElementById("legend-underserved").textContent =
+      `Underserved (> ${result.served_km} to ≤ ${result.underserved_km} km)`;
+    document.getElementById("legend-unserved").textContent =
+      `Unserved (> ${result.underserved_km} km)`;
+    gapAnalysisResults.replaceChildren();
+    ["served", "underserved", "unserved"].forEach((category) => {
+      const values = result.coverage[category];
+      const row = document.createElement("div");
+      row.className = "gap-analysis-row";
+      const label = document.createElement("span");
+      label.textContent = category;
+      const summary = document.createElement("strong");
+      summary.textContent =
+        `${values.cells.toLocaleString()} cells · ${Number(values.km2).toLocaleString()} km²`;
+      row.append(label, summary);
+      gapAnalysisResults.appendChild(row);
+    });
+  }
+
+  function renderCellCoverage(activeCells) {
+    layers.cells.clearLayers();
+    L.geoJSON(activeCells, {
+      style: (feature) => {
+        const coverage =
+          state.gapCoverage.get(Number(feature.properties.cell_id)) ||
+          feature.properties.coverage;
+        return {
+          color: "#0f1c1a",
+          weight: 0.4,
+          fillColor: coverageColor[coverage] || "#999",
+          fillOpacity: 0.45,
+        };
+      },
+      onEachFeature: (feature, layer) => {
+        const p = feature.properties;
+        const coverage =
+          state.gapCoverage.get(Number(p.cell_id)) || p.coverage;
+        layer.bindPopup(
+          `<strong>Cell ${escapeHtml(p.cell_id)}</strong><br>
+           Health access (${state.gapServedKm}/${state.gapUnderservedKm} km scenario): ${escapeHtml(coverage)}<br>
+           Nearest facility: ${p.dist_km == null ? "Unavailable" : `${escapeHtml(p.dist_km)} km`}<br>
+           Road length: ${escapeHtml(p.road_km)} km<br>
+           Mapped waterway length: ${escapeHtml(p.water_km)} km<br>
+           Baseline screening score: ${escapeHtml(p.priority_score)}`
+        );
+      },
+    }).addTo(layers.cells);
+  }
+
   function render(active) {
     Object.values(layers).forEach((layer) => {
       if (layer instanceof L.LayerGroup) layer.clearLayers();
@@ -1282,25 +1358,7 @@ async function init() {
       selectedBoundary.addData({ type: "FeatureCollection", features: state.areas });
     }
 
-    L.geoJSON(active.cells, {
-      style: (feature) => ({
-        color: "#0f1c1a",
-        weight: 0.4,
-        fillColor: coverageColor[feature.properties.coverage] || "#999",
-        fillOpacity: 0.45,
-      }),
-      onEachFeature: (feature, layer) => {
-        const p = feature.properties;
-        layer.bindPopup(
-          `<strong>Cell ${escapeHtml(p.cell_id)}</strong><br>
-           Health access: ${escapeHtml(p.coverage)}<br>
-           Nearest facility: ${escapeHtml(p.dist_km)} km<br>
-           Road length: ${escapeHtml(p.road_km)} km<br>
-           Mapped waterway length: ${escapeHtml(p.water_km)} km<br>
-           Screening score: ${escapeHtml(p.priority_score)}`
-        );
-      },
-    }).addTo(layers.cells);
+    renderCellCoverage(active.cells);
 
     L.geoJSON(active.roads, {
       style: (feature) => ({
@@ -1921,6 +1979,41 @@ async function init() {
     estimateScenarioCandidate(candidate);
   }, true);
   document.getElementById("export-brief").addEventListener("click", exportPlanningBrief);
+  let gapAnalysisTimer = null;
+  const scheduleGapAnalysis = () => {
+    const servedKm = Number(gapServedInput.value);
+    gapUnderservedInput.min = String(servedKm + 1);
+    if (Number(gapUnderservedInput.value) <= servedKm) {
+      gapUnderservedInput.value = String(servedKm + 1);
+    }
+    gapServedValue.textContent = `${servedKm} km`;
+    gapUnderservedValue.textContent = `${gapUnderservedInput.value} km`;
+    gapAnalysisResults.textContent = "Recalculating coverage in SQLite...";
+    const requestId = ++state.gapAnalysisRequestId;
+    clearTimeout(gapAnalysisTimer);
+    gapAnalysisTimer = setTimeout(async () => {
+      const params = new URLSearchParams({
+        served_km: String(servedKm),
+        underserved_km: gapUnderservedInput.value,
+      });
+      try {
+        const response = await fetch(`/api/gap-analysis?${params}`);
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || `Gap analysis failed (${response.status}).`);
+        }
+        if (requestId !== state.gapAnalysisRequestId) return;
+        renderGapAnalysisSummary(result);
+        renderCellCoverage(activeData().cells);
+      } catch (error) {
+        if (requestId === state.gapAnalysisRequestId) {
+          gapAnalysisResults.textContent = `Could not recalculate coverage: ${error.message}`;
+        }
+      }
+    }, 180);
+  };
+  gapServedInput.addEventListener("input", scheduleGapAnalysis);
+  gapUnderservedInput.addEventListener("input", scheduleGapAnalysis);
   schoolRadiusInput.addEventListener("change", () => {
     const value = Number(schoolRadiusInput.value);
     if (!Number.isFinite(value) || value < 1 || value > 50) {

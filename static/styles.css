@@ -151,6 +151,20 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 }
 .area-status { min-height: 32px; margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .control-hint { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.gap-analysis-control { padding: 8px 0 12px; border-bottom: 1px solid var(--line); }
+.gap-analysis-control h2 { margin: 4px 0 8px; }
+.gap-analysis-control > label {
+  display: flex;
+  justify-content: space-between;
+  margin: 8px 0 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.gap-analysis-control output { color: var(--ink); font-weight: 700; }
+.gap-analysis-control input[type="range"] { width: 100%; accent-color: var(--accent); }
+.gap-analysis-results { display: grid; gap: 4px; margin-top: 8px; font-size: 11px; }
+.gap-analysis-row { display: flex; justify-content: space-between; gap: 8px; }
+.gap-analysis-row strong { color: var(--ink); }
 .route-control { padding: 8px 0 12px; border-bottom: 1px solid var(--line); }
 .route-control h2 { margin: 4px 0 8px; }
 .route-control > label { margin: 7px 0 4px; color: var(--muted); font-size: 12px; }

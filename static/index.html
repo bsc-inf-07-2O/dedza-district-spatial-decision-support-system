@@ -28,6 +28,15 @@
       </div>
       <p class="area-status" id="area-status" role="status">Loading Dedza areas...</p>
     </section>
+    <section class="gap-analysis-control" aria-labelledby="gap-analysis-title">
+      <h2 id="gap-analysis-title">Health gap what-if · SQL</h2>
+      <p class="control-hint">Reclassify stored nearest-facility distances in SQL and update the map. Distances are calculated during database build; population, TA and priority summaries remain baseline.</p>
+      <label for="gap-served-km">Served at or below <output id="gap-served-value" for="gap-served-km">5 km</output></label>
+      <input id="gap-served-km" type="range" min="3" max="19" step="1" value="5" />
+      <label for="gap-underserved-km">Underserved up to <output id="gap-underserved-value" for="gap-underserved-km">8 km</output></label>
+      <input id="gap-underserved-km" type="range" min="6" max="20" step="1" value="8" />
+      <div id="gap-analysis-results" class="gap-analysis-results" role="status" aria-live="polite">Loading SQL gap analysis...</div>
+    </section>
     <section class="route-control">
       <h2>Road route estimate</h2>
       <p class="control-hint">Compare the shortest-distance route, quickest estimated route, and another alternative where available. Route distance and estimated travel time will appear on the map.</p>
@@ -97,9 +106,9 @@
     <section>
       <h2>Legend</h2>
       <ul class="legend">
-        <li><span class="swatch served"></span> Served (≤ 5 km)</li>
-        <li><span class="swatch underserved"></span> Underserved (5–8 km)</li>
-        <li><span class="swatch unserved"></span> Unserved (&gt; 8 km)</li>
+        <li><span class="swatch served"></span> <span id="legend-served">Served (≤ 5 km)</span></li>
+        <li><span class="swatch underserved"></span> <span id="legend-underserved">Underserved (5–8 km)</span></li>
+        <li><span class="swatch unserved"></span> <span id="legend-unserved">Unserved (&gt; 8 km)</span></li>
         <li><span class="swatch facility"></span> Health facility · circle</li>
         <li><span class="swatch facility-2026"></span> 2026 health reference · diamond</li>
         <li><span class="swatch school"></span> School · square</li>

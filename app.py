@@ -672,11 +672,23 @@ def load_payloads() -> dict:
 
     cells = {"type": "FeatureCollection", "features": []}
     for r in con.execute("SELECT * FROM cells"):
-        dist_km = round((r["dist_facility_m"] or 0) / 1000, 2)
+        dist_km = (
+            round(r["dist_facility_m"] / 1000, 2)
+            if r["dist_facility_m"] is not None
+            else None
+        )
         road_km = round(r["road_km"] or 0, 2)
         water_km = round(r["water_km"] or 0, 2)
-        travel_proxy_km = round(road_distance_proxy_km(dist_km, road_km, water_km), 2)
-        road_score = road_access_score(dist_km, road_km, water_km)
+        travel_proxy_km = (
+            round(road_distance_proxy_km(dist_km, road_km, water_km), 2)
+            if dist_km is not None
+            else None
+        )
+        road_score = (
+            road_access_score(dist_km, road_km, water_km)
+            if dist_km is not None
+            else None
+        )
         cells["features"].append(
             {
                 "type": "Feature",
@@ -1041,6 +1053,81 @@ def summary():
             "coverage": data["coverage"],
             "recommendations": data["recommendations"],
             "n_health_facilities_2026": len(data["health2026"]),
+        }
+    )
+
+
+@app.get("/api/gap-analysis")
+def gap_analysis():
+    try:
+        served_km = float(request.args.get("served_km", 5))
+        underserved_km = float(request.args.get("underserved_km", 8))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Thresholds must be numbers."}), 400
+    if (
+        not math.isfinite(served_km)
+        or not math.isfinite(underserved_km)
+        or not 0 < served_km < underserved_km <= 50
+    ):
+        return jsonify(
+            {"error": "Need 0 < served_km < underserved_km <= 50."}
+        ), 400
+
+    served_m = served_km * 1000
+    underserved_m = underserved_km * 1000
+    con = db()
+    try:
+        coverage_rows = con.execute(
+            """
+            WITH classified AS (
+                SELECT area_km2,
+                       CASE
+                           WHEN dist_facility_m IS NULL THEN 'unserved'
+                           WHEN dist_facility_m <= ? THEN 'served'
+                           WHEN dist_facility_m <= ? THEN 'underserved'
+                           ELSE 'unserved'
+                       END AS coverage
+                FROM cells
+            )
+            SELECT coverage, COUNT(*) AS cells, ROUND(SUM(area_km2), 1) AS km2
+            FROM classified
+            GROUP BY coverage
+            """,
+            (served_m, underserved_m),
+        ).fetchall()
+        cell_rows = con.execute(
+            """
+            SELECT cell_id,
+                   CASE
+                       WHEN dist_facility_m IS NULL THEN 'unserved'
+                       WHEN dist_facility_m <= ? THEN 'served'
+                       WHEN dist_facility_m <= ? THEN 'underserved'
+                       ELSE 'unserved'
+                   END AS coverage
+            FROM cells
+            ORDER BY cell_id
+            """,
+            (served_m, underserved_m),
+        ).fetchall()
+    finally:
+        con.close()
+
+    coverage = {
+        "served": {"cells": 0, "km2": 0},
+        "underserved": {"cells": 0, "km2": 0},
+        "unserved": {"cells": 0, "km2": 0},
+    }
+    for row in coverage_rows:
+        coverage[row["coverage"]] = {
+            "cells": row["cells"],
+            "km2": row["km2"] or 0,
+        }
+    return jsonify(
+        {
+            "served_km": served_km,
+            "underserved_km": underserved_km,
+            "coverage": coverage,
+            "cells": [dict(row) for row in cell_rows],
         }
     )
 
