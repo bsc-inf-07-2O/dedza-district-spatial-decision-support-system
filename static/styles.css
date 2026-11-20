@@ -507,8 +507,6 @@ label { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 
 .map-symbol .circle { border-radius: 50%; }
 .map-symbol .square { border-radius: 1px; }
 .map-symbol .diamond { border-radius: 1px; transform: rotate(45deg) scale(0.78); }
-.data-note { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 4px; }
-.data-note p { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 7px 0; }
 
 main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #map { position: relative; flex: 1; min-height: 420px; }

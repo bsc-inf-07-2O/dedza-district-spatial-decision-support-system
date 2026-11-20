@@ -1214,40 +1214,6 @@ def priority_scenario():
     )
 
 
-@app.get("/api/access-summary")
-def access_summary():
-    cells = load_payloads()["cells"]["features"]
-    scores = [
-        float(feature["properties"].get("road_access_score", 0))
-        for feature in cells
-        if feature["properties"].get("road_access_score") is not None
-    ]
-    proxies = [
-        float(feature["properties"].get("road_distance_proxy_km", 0))
-        for feature in cells
-        if feature["properties"].get("road_distance_proxy_km") is not None
-    ]
-    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-    avg_proxy_km = round(sum(proxies) / len(proxies), 2) if proxies else 0
-    coverage_breakdown = {}
-    for feature in cells:
-        coverage = feature["properties"].get("coverage", "unknown")
-        coverage_breakdown[coverage] = coverage_breakdown.get(coverage, 0) + 1
-    return jsonify(
-        {
-            "avg_access_score": avg_score,
-            "avg_road_distance_proxy_km": avg_proxy_km,
-            "coverage_breakdown": coverage_breakdown,
-            "cells": cells,
-        }
-    )
-
-
-@app.get("/api/road-access")
-def road_access():
-    return access_summary()
-
-
 @app.get("/api/traditional-authorities")
 def traditional_authorities():
     return jsonify(load_traditional_authorities())

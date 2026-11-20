@@ -14,9 +14,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if __package__:
-    from .site_constraints import geometry_bounds, iter_coordinates, point_in_geometry
+    from .site_constraints import geometry_bounds
 else:
-    from site_constraints import geometry_bounds, iter_coordinates, point_in_geometry
+    from site_constraints import geometry_bounds
 
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union

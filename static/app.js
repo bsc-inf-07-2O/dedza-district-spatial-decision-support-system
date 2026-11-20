@@ -249,10 +249,6 @@ document.addEventListener("input", (event) => {
 });
 updateRangeFills();
 
-function asFeature(geometry, properties = {}) {
-  return { type: "Feature", properties, geometry };
-}
-
 async function init() {
   const [summary, boundary, facilities, registry, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers, gapAnalysis, priorityScenario] = await Promise.all([
     fetchJson("/api/summary"),
@@ -305,7 +301,7 @@ async function init() {
     baselineTopCells: new Set(priorityScenario.top_cell_ids.map(Number)),
     priorityRequestId: 0,
   };
-  // Score under the current what-if weights (falls back to the stored baseline).
+  // Score under the current priority weights (falls back to the stored baseline).
   const cellScore = (properties) =>
     state.priorityScores.get(Number(properties.cell_id)) ?? properties.priority_score;
   const areaStatus = document.getElementById("area-status");
@@ -1809,7 +1805,7 @@ async function init() {
         const p = feature.properties;
         const coverageOf = () => state.gapCoverage.get(Number(p.cell_id)) || p.coverage;
         const distText = p.dist_km == null ? "unavailable" : `${p.dist_km} km`;
-        // Built on open so it always reflects the current what-if settings.
+        // Built on open so it always reflects the current slider settings.
         layer.bindPopup(() => {
           const score = Number(cellScore(p));
           const center = turf.pointOnFeature(feature).geometry.coordinates;

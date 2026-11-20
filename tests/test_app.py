@@ -279,16 +279,6 @@ def test_priority_scenario_rejects_invalid_input(client, query, message):
     assert message in response.get_json()["error"]
 
 
-def test_access_summary_endpoint(client):
-    response = client.get("/api/access-summary")
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert "avg_access_score" in payload
-    assert "cells" in payload
-    assert payload["cells"]
-    assert 0 <= payload["avg_access_score"] <= 100
-
-
 def test_motorcycle_speed_assumptions_follow_road_class():
     assert motorcycle_speed_kmh("primary") > motorcycle_speed_kmh("residential")
     assert motorcycle_speed_kmh("residential") > motorcycle_speed_kmh("track")
