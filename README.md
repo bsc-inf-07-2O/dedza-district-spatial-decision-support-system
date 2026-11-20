@@ -60,6 +60,28 @@ This downloads the Microsoft Global ML Building Footprints tiles whose tile boun
 - Compare proposed school or health-centre sites using population estimates, settlement access, and—when imported—detected building footprints.
 - View land-cover and terrain-slope layers for context, and export a selected-area CSV brief.
 
+## Database design
+
+The app uses two SQLite databases. `data/processed/dedza.sqlite` is committed. `scripts/build_db.py` generates its analysis tables with DuckDB Spatial, and the import scripts add the reference layers. Geometries are stored as GeoJSON text in WGS 84 (EPSG:4326). Distances and lengths are calculated in a projected CRS during the build.
+
+| Table | Rows | Purpose | Key columns |
+|---|---|---|---|
+| `boundary` | 1 | Dedza district polygon | `name`, `geojson` |
+| `cells` | 486 | Analysis grid: one row per cell with its spatial-analysis results | `cell_id` (PK), `area_km2`, `dist_facility_m`, `road_km`, `water_km`, `facilities_in_cell`, `coverage`, `road_access`, `water_access`, `priority_score`, `geojson` |
+| `recommendations` | 12 | Top-ranked underserved cells, ranked in SQL | `rank` (PK), `cell_id` → `cells.cell_id`, `dist_facility_km`, `priority_score`, `action` |
+| `facilities` | 34 | MOH baseline health facilities (points) | `id` (PK), `name`, `facility_type`, `owner`, `lon`, `lat` |
+| `health_facilities_2026` | 29 | Malawi Health 2026 reference points, kept separate from the baseline | `source_id` (PK), `name`, `ownership`, `lon`, `lat` |
+| `schools` | 280 | School points | `id` (PK), `name`, `school_id`, `status`, `lon`, `lat` |
+| `settlements` | 71 | OSM populated places | `id` (PK), `name`, `place`, `population`, `adm3_name`, `lon`, `lat` |
+| `roads` | 7,390 | OSM road lines; also the routing network | `id` (PK), `highway`, `name`, `geojson` |
+| `waterways` | 232 | OSM waterway lines | `id` (PK), `waterway`, `name`, `geojson` |
+| `population_summary` | 55 | WorldPop 2025 zonal totals per area and coverage class | (`area_name`, `coverage`, `source`, `year`) composite PK, `population_est` |
+| `meta` | 16 | Build parameters and provenance (thresholds, sources, dates) | `key` (PK), `value` |
+
+`data/processed/site_constraints.sqlite` is optional and not committed. `scripts/import_buildings.py` generates it, and its `buildings` table holds the detected footprints used to check candidate sites.
+
+Processing pipeline: source shapefiles and rasters → DuckDB Spatial (clip to boundary, project, nearest-facility distance, road and waterway length per cell, coverage classification, priority score, ranking) → SQLite tables → Flask JSON API (`/api/...`) → Leaflet map and Turf.js in the browser.
+
 ## Data and limitations
 
 The app combines MOH Malawi baseline facilities, a separate [Malawi Health 2026 reference layer](https://services6.arcgis.com/zOnyumh63cMmLBBH/ArcGIS/rest/services/Malawi_Health_2026/FeatureServer), supplied school data, HOT OSM settlements/roads/waterways, geoBoundaries, [WorldPop 2025](https://hub.worldpop.org/geodata/summary?id=74255), [ESA WorldCover 2021](https://esa-worldcover.org/en/data-access), and [Mapzen Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) when imported. WorldPop and WorldCover are CC BY 4.0. Confirm the health-reference service's license before operational use.
