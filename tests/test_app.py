@@ -49,6 +49,19 @@ def test_homepage_uses_locally_served_turf_bundle(client):
     assert bundle.data
 
 
+def test_homepage_uses_locally_served_leaflet_for_offline_use(client):
+    homepage = client.get("/")
+    assert b"unpkg.com" not in homepage.data
+    for path in (
+        "/static/vendor/leaflet-1.9.4/leaflet.js",
+        "/static/vendor/leaflet-1.9.4/leaflet.css",
+    ):
+        assert path.encode() in homepage.data
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.data
+
+
 def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypatch):
     raster_path = tmp_path / "land_cover.tif"
     with rasterio.open(
@@ -188,6 +201,7 @@ def test_database_contains_sql_derived_coverage_and_ranked_recommendations():
                 """
                 SELECT cell_id
                 FROM cells
+                WHERE area_km2 >= 1.0
                 ORDER BY priority_score DESC, cell_id DESC
                 LIMIT 12
                 """
@@ -204,6 +218,65 @@ def test_database_contains_sql_derived_coverage_and_ranked_recommendations():
 
     assert mismatched_cells == 0
     assert stored_recommendations == expected_recommendations
+
+
+def test_priority_scenario_default_weights_reproduce_baseline(client):
+    response = client.get("/api/priority-scenario")
+    assert response.status_code == 200
+    payload = response.get_json()
+
+    con = db()
+    try:
+        stored = {
+            row["cell_id"]: row["priority_score"]
+            for row in con.execute("SELECT cell_id, priority_score FROM cells")
+        }
+        baseline_top = [
+            row["cell_id"]
+            for row in con.execute("SELECT cell_id FROM recommendations ORDER BY rank")
+        ]
+    finally:
+        con.close()
+
+    assert payload["weights"] == {"distance": 55.0, "road": 25.0, "water": 20.0}
+    assert len(payload["cells"]) == len(stored)
+    for cell in payload["cells"]:
+        assert cell["score"] == pytest.approx(stored[cell["cell_id"]], abs=0.0006)
+    assert payload["top_cell_ids"] == baseline_top
+
+
+def test_priority_scenario_reweights_and_normalises(client):
+    # Distance-only scoring: ranking must follow nearest-facility distance.
+    payload = client.get(
+        "/api/priority-scenario?w_distance=40&w_road=0&w_water=0"
+    ).get_json()
+    assert payload["weights"] == {"distance": 100.0, "road": 0.0, "water": 0.0}
+
+    con = db()
+    try:
+        dist = {
+            row["cell_id"]: min((row["dist_facility_m"] or 16000) / 8000.0, 2.0)
+            for row in con.execute("SELECT cell_id, dist_facility_m FROM cells")
+        }
+    finally:
+        con.close()
+    top = payload["top_cell_ids"]
+    assert all(dist[a] >= dist[b] for a, b in zip(top, top[1:]))
+
+
+@pytest.mark.parametrize(
+    ("query", "message"),
+    [
+        ("w_distance=0&w_road=0&w_water=0", "At least one"),
+        ("w_distance=-5", "between 0 and 100"),
+        ("w_road=abc", "must be numbers"),
+        ("served_km=0", "served_km"),
+    ],
+)
+def test_priority_scenario_rejects_invalid_input(client, query, message):
+    response = client.get(f"/api/priority-scenario?{query}")
+    assert response.status_code == 400
+    assert message in response.get_json()["error"]
 
 
 def test_access_summary_endpoint(client):

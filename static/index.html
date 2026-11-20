@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Dedza District Spatial Decision Support System</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/vendor/leaflet-1.9.4/leaflet.css" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -30,12 +30,26 @@
     </section>
     <section class="gap-analysis-control" aria-labelledby="gap-analysis-title">
       <h2 id="gap-analysis-title">Health gap what-if · SQL</h2>
-      <p class="control-hint">Reclassify stored nearest-facility distances in SQL and update the map. Distances are calculated during database build; population, TA and priority summaries remain baseline.</p>
+      <p class="control-hint">Reclassify stored nearest-facility distances in SQL and update the map. Distances are calculated during database build; population and TA summaries remain baseline. The served threshold also sets which cells get the served discount in the priority score.</p>
       <label for="gap-served-km">Served at or below <output id="gap-served-value" for="gap-served-km">5 km</output></label>
       <input id="gap-served-km" type="range" min="3" max="19" step="1" value="5" />
       <label for="gap-underserved-km">Underserved up to <output id="gap-underserved-value" for="gap-underserved-km">8 km</output></label>
       <input id="gap-underserved-km" type="range" min="6" max="20" step="1" value="8" />
       <div id="gap-analysis-results" class="gap-analysis-results" role="status" aria-live="polite">Loading SQL gap analysis...</div>
+    </section>
+    <section class="gap-analysis-control priority-weights-control" aria-labelledby="priority-weights-title">
+      <h2 id="priority-weights-title">Priority weights what-if · SQL</h2>
+      <p class="control-hint">Choose how much each factor counts. Weights are normalised to 100%, every grid cell is re-scored in SQLite, and the numbered top-12 priority cells update on the map and in the Priority cells tab.</p>
+      <label for="w-distance">Distance to nearest facility <output id="w-distance-value" for="w-distance">55%</output></label>
+      <input id="w-distance" type="range" min="0" max="100" step="5" value="55" />
+      <label for="w-road">Lack of road access <output id="w-road-value" for="w-road">25%</output></label>
+      <input id="w-road" type="range" min="0" max="100" step="5" value="25" />
+      <label for="w-water">Lack of mapped waterways <output id="w-water-value" for="w-water">20%</output></label>
+      <input id="w-water" type="range" min="0" max="100" step="5" value="20" />
+      <div class="scenario-actions">
+        <button type="button" id="reset-weights">Reset to baseline (55 / 25 / 20)</button>
+      </div>
+      <p id="priority-weights-status" class="area-status" role="status" aria-live="polite">Baseline weights.</p>
     </section>
     <section class="route-control">
       <h2>Road route estimate</h2>
@@ -58,7 +72,7 @@
       <h2>School access radius</h2>
       <label for="school-radius">Maximum straight-line distance (km)</label>
       <input id="school-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="school-radius-help" />
-      <p class="control-hint" id="school-radius-help">After changing the value, click elsewhere to update. Counts update and settlement dots show which are within or beyond this distance; no school-radius circles are drawn. Keep the Settlements map layer enabled to see the dots.</p>
+      <p class="control-hint" id="school-radius-help">After changing the value, click elsewhere to update. Counts update and settlement dots show which are within or beyond this distance; no school-radius circles are drawn. Turn on the Settlements map layer to see the dots.</p>
       <p class="area-status" id="school-access-status" role="status"></p>
     </section>
     <section class="coverage-profile">
@@ -90,12 +104,12 @@
       <h2>Map layers</h2>
       <label><input type="checkbox" id="lyr-cells" checked /> Health access grid</label>
       <label><input type="checkbox" id="lyr-facilities" checked /> Health facilities</label>
-      <label><input type="checkbox" id="lyr-health2026" checked /> Health facilities · 2026 reference</label>
-      <label><input type="checkbox" id="lyr-schools" checked /> Schools</label>
-      <label><input type="checkbox" id="lyr-settlements" checked /> Settlements</label>
+      <label><input type="checkbox" id="lyr-health2026" /> Health facilities · 2026 reference</label>
+      <label><input type="checkbox" id="lyr-schools" /> Schools</label>
+      <label><input type="checkbox" id="lyr-settlements" /> Settlements</label>
       <label><input type="checkbox" id="lyr-buffers" /> 5 km coverage rings</label>
-      <label><input type="checkbox" id="lyr-roads" checked /> Roads</label>
-      <label><input type="checkbox" id="lyr-water" checked /> Mapped waterways</label>
+      <label><input type="checkbox" id="lyr-roads" /> Roads</label>
+      <label><input type="checkbox" id="lyr-water" /> Mapped waterways</label>
       <label><input type="checkbox" id="lyr-priority" checked /> Priority screening cells</label>
       <label><input type="checkbox" id="lyr-buildings" disabled /> Detected building footprints</label>
       <label><input type="checkbox" id="lyr-slope" disabled /> Terrain slope (Mapzen Terrain Tiles)</label>
@@ -193,7 +207,8 @@
         <details class="briefing-methods">
           <summary>Methods, sources and limitations</summary>
           <ul>
-            <li>Baseline health access uses the original MOH facility dataset and a 3 km analysis grid: served at 5 km or less, underserved at 5–8 km, and unserved beyond 8 km.</li>
+            <li>Baseline health access uses the original MOH facility dataset and a 3 km analysis grid: served at 5 km or less, underserved at 5–8 km, and unserved beyond 8 km. Distances also count MOH facilities in neighbouring districts within 20 km of the boundary, so border cells are not penalised; only Dedza facilities are drawn on the map.</li>
+            <li>The priority score weights distance, lack of road access and lack of mapped waterways (baseline 55 / 25 / 20; adjustable with the Priority weights what-if). Border slivers under 1 km² are scored but not ranked.</li>
             <li>WorldPop 2025 100 m estimates are summed into those baseline health-grid classes; they are modelled population estimates, not a census or school-access measure.</li>
             <li>School and health distances to settlements are straight-line. Settlement counts are not population-weighted, and the OSM population attribute is present for only a small subset.</li>
             <li>The 2026 ArcGIS health facilities are a separate reference layer and do not recalculate baseline health coverage.</li>
@@ -204,12 +219,13 @@
       </section>
       <section class="table-wrap analysis-panel" id="priority-panel" hidden>
         <h2>Priority screening cells</h2>
-        <p>Highest-scoring 3 km cells using health-facility distance, road density and mapped waterway length as preliminary proxies.</p>
+        <p>Highest-scoring 3 km cells using health-facility distance, road density and mapped waterway length as preliminary proxies. Scores follow the Priority weights what-if; "new" marks cells that are not in the baseline (55 / 25 / 20) top 12. Select a row to zoom to it.</p>
         <div class="table-scroll">
           <table>
             <thead>
               <tr>
                 <th>#</th>
+                <th>Score</th>
                 <th>Coverage</th>
                 <th>Distance to facility</th>
                 <th>Roads</th>
@@ -267,7 +283,7 @@
       </section>
     </section>
   </main>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/vendor/leaflet-1.9.4/leaflet.js"></script>
   <script src="/static/vendor/turf-7.4.0.min.js"></script>
   <script src="/static/app.js"></script>
 </body>

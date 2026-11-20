@@ -1,8 +1,11 @@
 const mapStatus = document.getElementById("map-status");
 if (typeof L === "undefined") {
-  mapStatus.textContent = "The map library did not load. Check your internet connection or whether unpkg.com is blocked, then reload.";
+  mapStatus.textContent = "The map library did not load. Check that static/vendor/leaflet-1.9.4 is present, then reload.";
 } else {
-const map = L.map("map", { zoomControl: true }).setView([-14.38, 34.33], 10);
+// Fractional zoom lets fitBounds fill the map with the district instead of
+// dropping a whole zoom level when the bounds are slightly too tall.
+const map = L.map("map", { zoomControl: true, zoomSnap: 0.25, zoomDelta: 0.5 })
+  .setView([-14.38, 34.33], 10);
 let baseTilesFailed = false;
 const baseMap = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: "&copy; OpenStreetMap contributors",
@@ -18,12 +21,13 @@ baseMap.addTo(map);
 const layers = {
   cells: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
-  health2026: L.layerGroup().addTo(map),
-  schools: L.layerGroup().addTo(map),
-  settlements: L.layerGroup().addTo(map),
+  // Off by default to keep the opening map readable; toggle under "Map layers".
+  health2026: L.layerGroup(),
+  schools: L.layerGroup(),
+  settlements: L.layerGroup(),
   buffers: L.layerGroup(),
-  roads: L.layerGroup().addTo(map),
-  water: L.layerGroup().addTo(map),
+  roads: L.layerGroup(),
+  water: L.layerGroup(),
   priority: L.layerGroup().addTo(map),
   scenario: L.layerGroup().addTo(map),
   buildings: L.layerGroup(),
@@ -40,6 +44,23 @@ const layers = {
     attribution: "© ESA WorldCover 2021 / Contains modified Copernicus Sentinel data 2021",
   }),
 };
+
+const mapLegend = L.control({ position: "bottomright" });
+mapLegend.onAdd = () => {
+  const div = L.DomUtil.create("div", "map-legend");
+  div.innerHTML = `
+    <strong>Health access</strong>
+    <ul class="legend">
+      <li><span class="swatch served"></span> <span id="map-legend-served">Served (≤ 5 km)</span></li>
+      <li><span class="swatch underserved"></span> <span id="map-legend-underserved">Underserved (5–8 km)</span></li>
+      <li><span class="swatch unserved"></span> <span id="map-legend-unserved">Unserved (&gt; 8 km)</span></li>
+      <li><span class="swatch facility"></span> Health facility</li>
+      <li><span class="priority-rank legend-rank">1</span> Priority cell (rank)</li>
+    </ul>`;
+  L.DomEvent.disableClickPropagation(div);
+  return div;
+};
+mapLegend.addTo(map);
 
 const selectedBoundary = L.geoJSON(null, {
   style: { color: "#f4a261", weight: 3, fillColor: "#f4a261", fillOpacity: 0.08 },
@@ -110,7 +131,7 @@ function asFeature(geometry, properties = {}) {
 }
 
 async function init() {
-  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers, gapAnalysis] = await Promise.all([
+  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers, gapAnalysis, priorityScenario] = await Promise.all([
     fetchJson("/api/summary"),
     fetchJson("/api/boundary"),
     fetchJson("/api/facilities"),
@@ -124,6 +145,7 @@ async function init() {
     fetchJson("/api/traditional-authorities"),
     fetchJson("/api/site-layers"),
     fetchJson("/api/gap-analysis"),
+    fetchJson("/api/priority-scenario"),
   ]);
 
   const taFeatures = taData.features;
@@ -156,7 +178,13 @@ async function init() {
     gapServedKm: gapAnalysis.served_km,
     gapUnderservedKm: gapAnalysis.underserved_km,
     gapAnalysisRequestId: 0,
+    priorityScores: new Map(priorityScenario.cells.map((cell) => [Number(cell.cell_id), cell.score])),
+    baselineTopCells: new Set(priorityScenario.top_cell_ids.map(Number)),
+    priorityRequestId: 0,
   };
+  // Score under the current what-if weights (falls back to the stored baseline).
+  const cellScore = (properties) =>
+    state.priorityScores.get(Number(properties.cell_id)) ?? properties.priority_score;
   const areaStatus = document.getElementById("area-status");
   const taSearch = document.getElementById("ta-search");
   const taOptions = document.getElementById("ta-options");
@@ -1297,12 +1325,15 @@ async function init() {
     gapUnderservedInput.min = String(result.served_km + 1);
     gapServedValue.textContent = `${result.served_km} km`;
     gapUnderservedValue.textContent = `${result.underserved_km} km`;
-    document.getElementById("legend-served").textContent =
-      `Served (≤ ${result.served_km} km)`;
-    document.getElementById("legend-underserved").textContent =
-      `Underserved (> ${result.served_km} to ≤ ${result.underserved_km} km)`;
-    document.getElementById("legend-unserved").textContent =
-      `Unserved (> ${result.underserved_km} km)`;
+    const legendLabels = {
+      served: `Served (≤ ${result.served_km} km)`,
+      underserved: `Underserved (> ${result.served_km} to ≤ ${result.underserved_km} km)`,
+      unserved: `Unserved (> ${result.underserved_km} km)`,
+    };
+    Object.entries(legendLabels).forEach(([key, text]) => {
+      document.getElementById(`legend-${key}`).textContent = text;
+      document.getElementById(`map-legend-${key}`).textContent = text;
+    });
     gapAnalysisResults.replaceChildren();
     ["served", "underserved", "unserved"].forEach((category) => {
       const values = result.coverage[category];
@@ -1342,10 +1373,57 @@ async function init() {
            Nearest facility: ${p.dist_km == null ? "Unavailable" : `${escapeHtml(p.dist_km)} km`}<br>
            Road length: ${escapeHtml(p.road_km)} km<br>
            Mapped waterway length: ${escapeHtml(p.water_km)} km<br>
-           Baseline screening score: ${escapeHtml(p.priority_score)}`
+           Priority score (current weights): ${escapeHtml(cellScore(p))}<br>
+           Baseline score (55/25/20): ${escapeHtml(p.priority_score)}`
         );
       },
     }).addTo(layers.cells);
+  }
+
+  function renderPriorityCells(active) {
+    layers.priority.clearLayers();
+    // Border slivers (< 1 km², see MIN_RANKED_CELL_KM2) are scored but not ranked.
+    const topCells = active.cells
+      .filter((cell) => Number(cell.properties.area_km2) >= 1)
+      .sort((a, b) =>
+        cellScore(b.properties) - cellScore(a.properties)
+        || Number(b.properties.cell_id) - Number(a.properties.cell_id))
+      .slice(0, 12);
+    const recBody = document.getElementById("recs");
+    recBody.replaceChildren();
+    topCells.forEach((cell, index) => {
+      const p = cell.properties;
+      const rank = index + 1;
+      const point = turf.pointOnFeature(cell).geometry.coordinates;
+      const accessScore = travelAdjustedScore(p);
+      const isNew = !state.baselineTopCells.has(Number(p.cell_id));
+      L.marker([point[1], point[0]], {
+        icon: L.divIcon({
+          className: "priority-rank-icon",
+          html: `<span class="priority-rank">${rank}</span>`,
+          iconSize: [22, 22],
+          iconAnchor: [11, 11],
+        }),
+        zIndexOffset: 1000 - rank,
+        title: `Priority rank ${rank}`,
+      })
+        .bindPopup(`<strong>Priority rank ${rank} · cell ${escapeHtml(p.cell_id)}</strong><br>Score (current weights): ${escapeHtml(cellScore(p))}<br>${escapeHtml(planningPrompt(p))}<br>Road-distance access proxy: ${escapeHtml(accessScore)}/100`)
+        .addTo(layers.priority);
+
+      const row = document.createElement("tr");
+      row.className = "rec-row";
+      row.innerHTML = `
+        <td>${rank}${isNew ? ' <span class="tag new-rank" title="Not in the baseline top 12">new</span>' : ""}</td>
+        <td>${escapeHtml(cellScore(p))}</td>
+        <td><span class="tag ${escapeHtml(p.coverage)}">${escapeHtml(p.coverage)}</span></td>
+        <td>${escapeHtml(p.dist_km)} km</td>
+        <td>${escapeHtml(p.road_km)} km</td>
+        <td>${escapeHtml(p.water_km)} km</td>
+        <td><span class="tag ${travelAdjustedLabel(accessScore)}">${accessScore}/100</span></td>
+        <td>${escapeHtml(planningPrompt(p))}</td>`;
+      row.addEventListener("click", () => map.setView([point[1], point[0]], 12));
+      recBody.appendChild(row);
+    });
   }
 
   function render(active) {
@@ -1431,38 +1509,7 @@ async function init() {
         .addTo(layers.settlements);
     });
 
-    const topCells = [...active.cells]
-      .sort((a, b) => b.properties.priority_score - a.properties.priority_score)
-      .slice(0, 12);
-    const recBody = document.getElementById("recs");
-    recBody.replaceChildren();
-    topCells.forEach((cell, index) => {
-      const p = cell.properties;
-      const point = turf.pointOnFeature(cell).geometry.coordinates;
-      const accessScore = travelAdjustedScore(p);
-      L.circleMarker([point[1], point[0]], {
-        radius: 7,
-        color: "#fff",
-        weight: 1.5,
-        fillColor: "#c44536",
-        fillOpacity: 0.95,
-      })
-        .bindPopup(`<strong>Screening cell ${escapeHtml(p.cell_id)}</strong><br>${escapeHtml(planningPrompt(p))}<br>Road-distance access proxy: ${escapeHtml(accessScore)}/100`)
-        .addTo(layers.priority);
-
-      const row = document.createElement("tr");
-      row.className = "rec-row";
-      row.innerHTML = `
-        <td>${index + 1}</td>
-        <td><span class="tag ${escapeHtml(p.coverage)}">${escapeHtml(p.coverage)}</span></td>
-        <td>${escapeHtml(p.dist_km)} km</td>
-        <td>${escapeHtml(p.road_km)} km</td>
-        <td>${escapeHtml(p.water_km)} km</td>
-        <td><span class="tag ${travelAdjustedLabel(accessScore)}">${accessScore}/100</span></td>
-        <td>${escapeHtml(planningPrompt(p))}</td>`;
-      row.addEventListener("click", () => map.setView([point[1], point[0]], 12));
-      recBody.appendChild(row);
-    });
+    renderPriorityCells(active);
 
     const areaStats = active.cells.reduce((stats, cell) => {
       const area = clippedCellArea(cell);
@@ -1495,8 +1542,9 @@ async function init() {
       ? populationUnserved / populationTotal * 100
       : 0;
     const priorityCells = [...active.cells]
-      .filter((cell) => cell.properties.coverage === "unserved")
-      .sort((a, b) => b.properties.priority_score - a.properties.priority_score)
+      .filter((cell) =>
+        cell.properties.coverage === "unserved" && Number(cell.properties.area_km2) >= 1)
+      .sort((a, b) => cellScore(b.properties) - cellScore(a.properties))
       .slice(0, 3);
     const schoolReach = active.settlements.filter(
       (settlement) => (nearestSchoolBySettlement.get(settlement)?.distance ?? Infinity) <= schoolRadiusKm
@@ -2005,6 +2053,8 @@ async function init() {
         if (requestId !== state.gapAnalysisRequestId) return;
         renderGapAnalysisSummary(result);
         renderCellCoverage(activeData().cells);
+        // The served-cell discount in the priority score follows this threshold.
+        schedulePriorityScenario();
       } catch (error) {
         if (requestId === state.gapAnalysisRequestId) {
           gapAnalysisResults.textContent = `Could not recalculate coverage: ${error.message}`;
@@ -2014,6 +2064,85 @@ async function init() {
   };
   gapServedInput.addEventListener("input", scheduleGapAnalysis);
   gapUnderservedInput.addEventListener("input", scheduleGapAnalysis);
+
+  const weightInputs = {
+    distance: document.getElementById("w-distance"),
+    road: document.getElementById("w-road"),
+    water: document.getElementById("w-water"),
+  };
+  const weightOutputs = {
+    distance: document.getElementById("w-distance-value"),
+    road: document.getElementById("w-road-value"),
+    water: document.getElementById("w-water-value"),
+  };
+  const priorityWeightsStatus = document.getElementById("priority-weights-status");
+  const BASELINE_WEIGHTS = { distance: 55, road: 25, water: 20 };
+  let priorityTimer = null;
+
+  function showNormalisedWeights() {
+    const raw = Object.fromEntries(
+      Object.entries(weightInputs).map(([key, input]) => [key, Number(input.value)])
+    );
+    const total = raw.distance + raw.road + raw.water;
+    Object.entries(raw).forEach(([key, value]) => {
+      weightOutputs[key].textContent = total ? `${Math.round(value / total * 100)}%` : "0%";
+    });
+    return { raw, total };
+  }
+
+  function schedulePriorityScenario() {
+    const { raw, total } = showNormalisedWeights();
+    const requestId = ++state.priorityRequestId;
+    clearTimeout(priorityTimer);
+    if (!total) {
+      priorityWeightsStatus.textContent = "Set at least one weight above zero.";
+      return;
+    }
+    priorityWeightsStatus.textContent = "Re-scoring cells in SQLite...";
+    priorityTimer = setTimeout(async () => {
+      const params = new URLSearchParams({
+        w_distance: String(raw.distance),
+        w_road: String(raw.road),
+        w_water: String(raw.water),
+        served_km: String(state.gapServedKm),
+      });
+      try {
+        const response = await fetch(`/api/priority-scenario?${params}`);
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || `Priority scoring failed (${response.status}).`);
+        }
+        if (requestId !== state.priorityRequestId) return;
+        state.priorityScores = new Map(
+          result.cells.map((cell) => [Number(cell.cell_id), cell.score])
+        );
+        render(activeData());
+        const changed = result.top_cell_ids
+          .filter((id) => !state.baselineTopCells.has(Number(id))).length;
+        const w = result.weights;
+        priorityWeightsStatus.textContent =
+          `Weights ${w.distance} / ${w.road} / ${w.water}%. ` +
+          (changed
+            ? `${changed} of the district top 12 cells differ from the baseline ranking.`
+            : "District top 12 matches the baseline ranking.");
+      } catch (error) {
+        if (requestId === state.priorityRequestId) {
+          priorityWeightsStatus.textContent = `Could not re-score cells: ${error.message}`;
+        }
+      }
+    }, 200);
+  }
+
+  Object.values(weightInputs).forEach((input) => {
+    input.addEventListener("input", schedulePriorityScenario);
+  });
+  document.getElementById("reset-weights").addEventListener("click", () => {
+    Object.entries(BASELINE_WEIGHTS).forEach(([key, value]) => {
+      weightInputs[key].value = String(value);
+    });
+    schedulePriorityScenario();
+  });
+  showNormalisedWeights();
   schoolRadiusInput.addEventListener("change", () => {
     const value = Number(schoolRadiusInput.value);
     if (!Number.isFinite(value) || value < 1 || value > 50) {

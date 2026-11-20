@@ -16,6 +16,17 @@ DB_PATH = PROCESSED / "dedza.sqlite"
 
 ADM2 = RAW / "MWI_ADM2_simplified.geojson"
 
+# Facilities in neighbouring districts within this distance of the boundary are
+# included in the nearest-facility distance (not in the Dedza facility layer).
+# 20 km exceeds the 16 km distance cap used by the priority score.
+CROSS_BORDER_KM = 20.0
+
+# Border slivers smaller than this are scored but not ranked as recommendations.
+MIN_RANKED_CELL_KM2 = 1.0
+
+# Tables created by other import scripts; a rebuild carries them over.
+IMPORTED_TABLES = ("schools", "settlements", "health_facilities_2026", "population_summary")
+
 MAJOR_ROADS = (
     "motorway",
     "trunk",
@@ -61,7 +72,19 @@ def main() -> None:
         default=ROOT / "data" / "source",
         help="Lab 4 data directory (defaults to data/source)",
     )
-    source_dir = parser.parse_args().source_dir.expanduser().resolve()
+    parser.add_argument(
+        "--cross-border-km",
+        type=float,
+        default=CROSS_BORDER_KM,
+        help=(
+            "Also measure distance to facilities up to this many km outside Dedza, "
+            "so border cells are not marked unserved when a neighbouring district's "
+            f"facility is close (default {CROSS_BORDER_KM:g}; 0 = Dedza facilities only)"
+        ),
+    )
+    args = parser.parse_args()
+    source_dir = args.source_dir.expanduser().resolve()
+    cross_border_m = max(0.0, args.cross_border_km) * 1000
     facilities_path = source_dir / "Facilities" / "Facilities" / "facilities.shp"
     roads_path = source_dir / "hotosm_mwi_roads_osm_shp" / "roads_lines.shp"
     waterways_path = source_dir / "hotosm_mwi_waterways_osm_shp" / "waterways_lines.shp"
@@ -137,6 +160,31 @@ def main() -> None:
     if n_fac == 0:
         con.close()
         raise RuntimeError("No health facilities fall inside Dedza; coverage analysis cannot be built.")
+
+    # Facilities used for distance: Dedza's own plus any in neighbouring districts
+    # within cross_border_m of the boundary (avoids a district-edge effect).
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE facilities_access AS
+        SELECT f.name, ST_Point(f.lon, f.lat) AS geom
+        FROM facilities_all f, dedza d
+        WHERE f.lon IS NOT NULL AND f.lat IS NOT NULL
+          AND (
+              ST_Intersects(ST_Point(f.lon, f.lat), d.geom)
+              OR ST_DWithin(
+                  ST_Transform(ST_Point(f.lon, f.lat), 'EPSG:4326', 'EPSG:32736'),
+                  ST_Transform(d.geom, 'EPSG:4326', 'EPSG:32736'),
+                  ?
+              )
+          )
+        """,
+        [cross_border_m],
+    )
+    n_access = con.execute("SELECT COUNT(*) FROM facilities_access").fetchone()[0]
+    print(
+        f"Facilities used for distance: {n_access} "
+        f"({n_access - n_fac} outside Dedza within {cross_border_m / 1000:g} km)"
+    )
 
     clip_db = PROCESSED / "clip.duckdb"
     envelope = f"ST_MakeEnvelope({xmin - 0.02}, {ymin - 0.02}, {xmax + 0.02}, {ymax + 0.02})"
@@ -250,7 +298,13 @@ def main() -> None:
                    MIN(ST_Distance(
                         ST_Transform(c.centroid, 'EPSG:4326', 'EPSG:32736'),
                         ST_Transform(f.geom, 'EPSG:4326', 'EPSG:32736')
-                   )) AS dist_facility_m,
+                   )) AS dist_facility_m
+            FROM cells c
+            CROSS JOIN facilities_access f
+            GROUP BY c.cell_id
+        ),
+        fac_count AS (
+            SELECT c.cell_id,
                    COUNT(*) FILTER (WHERE ST_Intersects(f.geom, c.geom)) AS facilities_in_cell
             FROM cells c
             CROSS JOIN facilities f
@@ -282,10 +336,11 @@ def main() -> None:
             f.dist_facility_m,
             COALESCE(r.road_km, 0) AS road_km,
             COALESCE(w.water_km, 0) AS water_km,
-            COALESCE(f.facilities_in_cell, 0) AS facilities_in_cell,
+            COALESCE(fc.facilities_in_cell, 0) AS facilities_in_cell,
             c.geom
         FROM cells c
         LEFT JOIN fac_dist f USING (cell_id)
+        LEFT JOIN fac_count fc USING (cell_id)
         LEFT JOIN road_len r USING (cell_id)
         LEFT JOIN water_len w USING (cell_id)
         """
@@ -339,8 +394,12 @@ def main() -> None:
     print("Grid stats:", stats)
 
     print("Exporting layers to SQLite...")
+    backup_path = DB_PATH.with_suffix(".sqlite.bak")
     if DB_PATH.exists():
-        DB_PATH.unlink()
+        # Keep the previous database: it holds tables from the other import
+        # scripts, which are copied into the new database below.
+        DB_PATH.replace(backup_path)
+        print(f"Previous database kept as {backup_path.name}")
     sql = sqlite3.connect(DB_PATH)
     cur = sql.cursor()
     cur.executescript(
@@ -493,6 +552,7 @@ def main() -> None:
                     THEN 'Assess WASH / borehole need (far from mapped waterways)'
                     ELSE '' END AS water_action
             FROM cell_analysis
+            WHERE area_km2 >= ?
         )
         SELECT
             rank, cell_id, lon, lat, coverage,
@@ -511,7 +571,8 @@ def main() -> None:
         FROM ranked
         WHERE rank <= 12
         ORDER BY rank
-        """
+        """,
+        [MIN_RANKED_CELL_KM2],
     ).fetchall()
     for recommendation in recommendation_rows:
         cur.execute(
@@ -540,13 +601,47 @@ def main() -> None:
         "crs": "EPSG:4326",
         "analysis_crs": "EPSG:32736",
         "sources": "MOH Malawi health facilities shapefile; HOT OSM roads & waterways; geoBoundaries MWI ADM2",
+        "n_facilities_for_distance": str(n_access),
+        "cross_border_km": f"{cross_border_m / 1000:g}",
+        "min_ranked_cell_km2": f"{MIN_RANKED_CELL_KM2:g}",
     }
     for k, v in meta.items():
         cur.execute("INSERT INTO meta VALUES (?,?)", (k, v))
-
     sql.commit()
+
+    carried = carry_over_imported_tables(sql, backup_path)
     sql.close()
     print("Wrote", DB_PATH)
+    if carried:
+        print("Carried over imported tables:", ", ".join(carried))
+    if "population_summary" in carried:
+        print(
+            "Coverage classes may have changed: run `python scripts/import_worldpop.py` "
+            "to refresh population_summary."
+        )
+
+
+def carry_over_imported_tables(sql: sqlite3.Connection, backup_path: Path) -> list[str]:
+    """Copy tables written by the other import scripts from the previous database."""
+    if not backup_path.exists():
+        return []
+    carried = []
+    sql.execute("ATTACH DATABASE ? AS old", (str(backup_path),))
+    try:
+        for table in IMPORTED_TABLES:
+            row = sql.execute(
+                "SELECT sql FROM old.sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if not row:
+                continue
+            sql.execute(row[0])  # same schema, created in the new main database
+            sql.execute(f'INSERT INTO main."{table}" SELECT * FROM old."{table}"')
+            carried.append(table)
+        sql.commit()
+    finally:
+        sql.execute("DETACH DATABASE old")
+    return carried
 
 
 if __name__ == "__main__":

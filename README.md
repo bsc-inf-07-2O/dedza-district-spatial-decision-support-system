@@ -57,6 +57,7 @@ This downloads the Microsoft Global ML Building Footprints tiles whose tile boun
 
 - Filter the map and service statistics by Dedza district or ADM3 area.
 - Review mapped school and health-service access, compare route options, and explore Traditional Authority priorities.
+- Re-run the health-gap thresholds and the priority-score weights live in SQL and watch the map and ranking update.
 - Compare proposed school or health-centre sites using population estimates, settlement access, and—when imported—detected building footprints.
 - View land-cover and terrain-slope layers for context, and export a selected-area CSV brief.
 
@@ -68,19 +69,19 @@ The app uses two SQLite databases. `data/processed/dedza.sqlite` is committed. `
 |---|---|---|---|
 | `boundary` | 1 | Dedza district polygon | `name`, `geojson` |
 | `cells` | 486 | Analysis grid: one row per cell with its spatial-analysis results | `cell_id` (PK), `area_km2`, `dist_facility_m`, `road_km`, `water_km`, `facilities_in_cell`, `coverage`, `road_access`, `water_access`, `priority_score`, `geojson` |
-| `recommendations` | 12 | Top-ranked underserved cells, ranked in SQL | `rank` (PK), `cell_id` → `cells.cell_id`, `dist_facility_km`, `priority_score`, `action` |
-| `facilities` | 34 | MOH baseline health facilities (points) | `id` (PK), `name`, `facility_type`, `owner`, `lon`, `lat` |
+| `recommendations` | 12 | Top-ranked cells, ranked in SQL (border slivers under 1 km² excluded) | `rank` (PK), `cell_id` → `cells.cell_id`, `dist_facility_km`, `priority_score`, `action` |
+| `facilities` | 34 | MOH baseline health facilities inside Dedza (points shown on the map) | `id` (PK), `name`, `facility_type`, `owner`, `lon`, `lat` |
 | `health_facilities_2026` | 29 | Malawi Health 2026 reference points, kept separate from the baseline | `source_id` (PK), `name`, `ownership`, `lon`, `lat` |
 | `schools` | 280 | School points | `id` (PK), `name`, `school_id`, `status`, `lon`, `lat` |
 | `settlements` | 71 | OSM populated places | `id` (PK), `name`, `place`, `population`, `adm3_name`, `lon`, `lat` |
 | `roads` | 7,390 | OSM road lines; also the routing network | `id` (PK), `highway`, `name`, `geojson` |
 | `waterways` | 232 | OSM waterway lines | `id` (PK), `waterway`, `name`, `geojson` |
 | `population_summary` | 55 | WorldPop 2025 zonal totals per area and coverage class | (`area_name`, `coverage`, `source`, `year`) composite PK, `population_est` |
-| `meta` | 16 | Build parameters and provenance (thresholds, sources, dates) | `key` (PK), `value` |
+| `meta` | 19 | Build parameters and provenance (thresholds, cross-border distance, sources) | `key` (PK), `value` |
 
 `data/processed/site_constraints.sqlite` is optional and not committed. `scripts/import_buildings.py` generates it, and its `buildings` table holds the detected footprints used to check candidate sites.
 
-Processing pipeline: source shapefiles and rasters → DuckDB Spatial (clip to boundary, project, nearest-facility distance, road and waterway length per cell, coverage classification, priority score, ranking) → SQLite tables → Flask JSON API (`/api/...`) → Leaflet map and Turf.js in the browser.
+Processing pipeline: source shapefiles and rasters → DuckDB Spatial (clip to boundary, project, nearest-facility distance, road and waterway length per cell, coverage classification, priority score, ranking) → SQLite tables → Flask JSON API (`/api/...`) → Leaflet map and Turf.js in the browser. Leaflet 1.9.4 and Turf.js are bundled in `static/vendor/`, so the app runs without internet; only the OpenStreetMap base tiles need a connection.
 
 ## Data and limitations
 
@@ -94,6 +95,12 @@ The database can be rebuilt when the source Lab 4 shapefiles are available. Put 
 
 During a rebuild, DuckDB Spatial performs the projected nearest-facility, road-length, and waterway-length calculations and classifies each analysis cell in SQL. SQL also calculates cell priority scores, district coverage totals, and the ranked top-12 recommendations. The resulting analysis tables are exported to `dedza.sqlite`, which the Flask app queries to serve its API and map layers; the app does not recompute the facility-coverage or priority analysis in Python.
 
-The **Health gap what-if** sliders run a parameterized SQLite query against the stored nearest-facility distances. They update map coverage classes and district cell/area totals without rerunning the spatial distance calculation. Population summaries, Traditional Authority priorities, and priority scores remain the baseline 5 km / 8 km analysis.
+Nearest-facility distance includes MOH facilities in neighbouring districts within 20 km of the Dedza boundary (36 in the current build, 70 in total), so border cells are not marked unserved when a facility across the district line is close. Only Dedza's 34 facilities are stored in `facilities` and drawn on the map. Change the buffer with `--cross-border-km`; `--cross-border-km 0` restores Dedza-only distances. Cells smaller than 1 km² (border slivers) are scored but not ranked as recommendations.
+
+A rebuild keeps the previous database as `dedza.sqlite.bak` and carries over the `schools`, `settlements`, `health_facilities_2026` and `population_summary` tables. Coverage classes can change, so run `python scripts/import_worldpop.py` afterwards to refresh `population_summary`.
+
+The **Health gap what-if** sliders run a parameterized SQLite query against the stored nearest-facility distances. They update map coverage classes and district cell/area totals without rerunning the spatial distance calculation. Population summaries and Traditional Authority priorities remain the baseline 5 km / 8 km analysis.
+
+The **Priority weights what-if** sliders (`/api/priority-scenario`) re-score every cell in a parameterized SQLite query with user-chosen weights for distance, lack of road access and lack of mapped waterways. Weights are normalised to sum to 100%, the served-cell multiplier follows the current Health gap served threshold, and the numbered top-12 markers and Priority cells table update. The default 55 / 25 / 20 reproduces the stored baseline exactly.
 
 The baseline priority score is a screening heuristic, not a validated suitability model: distance contributes 55% (capped at 16 km and normalized to 8 km), road length contributes 25% (capped at 8 km), and mapped-waterway length contributes 20% (capped at 4 km); served cells receive a 0.35 multiplier. Road-access bands (4 km and 1.5 km) and waterway-length bands (2 km and 0.5 km) are also assumptions. Waterway length is only a mapped-waterway proxy, not water-point or borehole access. A build with no health facilities inside Dedza fails rather than treating missing distances as zero.

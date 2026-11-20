@@ -1132,6 +1132,79 @@ def gap_analysis():
     )
 
 
+PRIORITY_BASELINE_WEIGHTS = {"distance": 55.0, "road": 25.0, "water": 20.0}
+# Matches MIN_RANKED_CELL_KM2 in scripts/build_db.py: border slivers are not ranked.
+MIN_RANKED_CELL_KM2 = 1.0
+
+
+@app.get("/api/priority-scenario")
+def priority_scenario():
+    """Re-score every grid cell in SQL with user-chosen criterion weights.
+
+    Uses the same normalisation as the build-time score in scripts/build_db.py:
+    distance capped at 16 km and normalised to 8 km, road length capped at 8 km,
+    mapped-waterway length capped at 4 km, and a 0.35 multiplier for served cells.
+    Weights are normalised to sum to 1, so 55/25/20 reproduces the baseline.
+    """
+    try:
+        raw = {
+            "distance": float(request.args.get("w_distance", PRIORITY_BASELINE_WEIGHTS["distance"])),
+            "road": float(request.args.get("w_road", PRIORITY_BASELINE_WEIGHTS["road"])),
+            "water": float(request.args.get("w_water", PRIORITY_BASELINE_WEIGHTS["water"])),
+        }
+        served_km = float(request.args.get("served_km", 5))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Weights and served_km must be numbers."}), 400
+    if not all(math.isfinite(v) and 0 <= v <= 100 for v in raw.values()):
+        return jsonify({"error": "Each weight must be between 0 and 100."}), 400
+    total = sum(raw.values())
+    if total <= 0:
+        return jsonify({"error": "At least one weight must be above zero."}), 400
+    if not math.isfinite(served_km) or not 0 < served_km <= 50:
+        return jsonify({"error": "Need 0 < served_km <= 50."}), 400
+
+    weights = {key: value / total for key, value in raw.items()}
+    con = db()
+    try:
+        rows = con.execute(
+            """
+            SELECT cell_id, area_km2,
+                   ROUND((
+                       MIN(COALESCE(dist_facility_m, 16000) / 8000.0, 2.0) * :w_distance
+                       + (1 - MIN(road_km / 8.0, 1.0)) * :w_road
+                       + (1 - MIN(water_km / 4.0, 1.0)) * :w_water
+                   ) * CASE
+                           WHEN dist_facility_m IS NOT NULL AND dist_facility_m <= :served_m
+                           THEN 0.35 ELSE 1.0
+                       END, 3) AS score
+            FROM cells
+            ORDER BY score DESC, cell_id DESC
+            """,
+            {
+                "w_distance": weights["distance"],
+                "w_road": weights["road"],
+                "w_water": weights["water"],
+                "served_m": served_km * 1000,
+            },
+        ).fetchall()
+    finally:
+        con.close()
+
+    return jsonify(
+        {
+            "weights": {key: round(value * 100, 1) for key, value in weights.items()},
+            "served_km": served_km,
+            "min_ranked_cell_km2": MIN_RANKED_CELL_KM2,
+            "top_cell_ids": [
+                row["cell_id"]
+                for row in rows
+                if (row["area_km2"] or 0) >= MIN_RANKED_CELL_KM2
+            ][:12],
+            "cells": [{"cell_id": row["cell_id"], "score": row["score"]} for row in rows],
+        }
+    )
+
+
 @app.get("/api/access-summary")
 def access_summary():
     cells = load_payloads()["cells"]["features"]

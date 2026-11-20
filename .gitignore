@@ -10,3 +10,4 @@ scripts/_inspect.py
 scripts/_inspect2.py
 scripts/_probe_duckdb.py
 scripts/_st_read_help.py
+data/processed/dedza.sqlite.bak
