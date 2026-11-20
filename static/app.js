@@ -7,22 +7,69 @@ if (typeof L === "undefined") {
 const map = L.map("map", { zoomControl: true, zoomSnap: 0.25, zoomDelta: 0.5 })
   .setView([-14.38, 34.33], 10);
 let baseTilesFailed = false;
-const baseMap = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+// OSM's own guidance is the single tile.openstreetmap.org host (no a/b/c subdomains).
+const baseMap = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: "&copy; OpenStreetMap contributors",
   maxZoom: 19,
 });
-baseMap.on("tileerror", () => {
+// An occasional failed tile is normal (busy tile server, brief network drop),
+// so retry each tile up to twice and only warn when tiles are really missing.
+// The warning clears itself as soon as tiles load again, and can be clicked away.
+const TILE_RETRIES = 2;
+let tileWarningTimer = null;
+const showTileWarning = (message) => {
   baseTilesFailed = true;
   mapStatus.hidden = false;
-  mapStatus.textContent = "Base map tiles could not be loaded. Check your internet connection; planning overlays may still be available.";
+  mapStatus.classList.add("dismissible");
+  mapStatus.title = "Click to dismiss";
+  mapStatus.textContent = message;
+};
+const clearTileWarning = () => {
+  clearTimeout(tileWarningTimer);
+  if (!baseTilesFailed) return;
+  baseTilesFailed = false;
+  mapStatus.hidden = true;
+  mapStatus.classList.remove("dismissible");
+  mapStatus.removeAttribute("title");
+};
+mapStatus.addEventListener("click", () => {
+  if (mapStatus.classList.contains("dismissible")) clearTileWarning();
 });
+baseMap.on("tileerror", ({ tile, coords }) => {
+  const attempt = Number(tile.dataset.retry || 0);
+  if (attempt < TILE_RETRIES) {
+    tile.dataset.retry = String(attempt + 1);
+    setTimeout(() => {
+      tile.src = `${baseMap.getTileUrl(coords)}?retry=${attempt + 1}`;
+    }, 800 * (attempt + 1));
+    return;
+  }
+  clearTimeout(tileWarningTimer);
+  tileWarningTimer = setTimeout(() => {
+    showTileWarning(navigator.onLine === false
+      ? "You appear to be offline, so the background map is unavailable. All planning layers and analysis still work."
+      : "Some background map tiles could not be loaded. Pan or zoom to retry; planning layers and analysis still work.");
+    // A partial failure is not worth a permanent banner.
+    if (navigator.onLine !== false) tileWarningTimer = setTimeout(clearTileWarning, 6000);
+  }, 1500);
+});
+baseMap.on("tileload", () => {
+  if (baseTilesFailed) clearTileWarning();
+});
+window.addEventListener("online", () => {
+  clearTileWarning();
+  baseMap.redraw();
+});
+window.addEventListener("offline", () => showTileWarning(
+  "You appear to be offline, so the background map is unavailable. All planning layers and analysis still work."
+));
 baseMap.addTo(map);
 
 const layers = {
   cells: L.layerGroup().addTo(map),
   facilities: L.layerGroup().addTo(map),
   // Off by default to keep the opening map readable; toggle under "Map layers".
-  health2026: L.layerGroup(),
+  registry: L.layerGroup(),
   schools: L.layerGroup(),
   settlements: L.layerGroup(),
   buffers: L.layerGroup(),
@@ -87,6 +134,16 @@ async function fetchJson(url) {
   return res.json();
 }
 
+// "Near Mlinga (5)" -> "near Mlinga (5)"; other names get a "near " prefix.
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function nearPlace(name) {
+  const text = String(name || "an unnamed settlement");
+  return /^near /i.test(text) ? `near ${text.slice(5)}` : `near ${text}`;
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -117,6 +174,57 @@ function kpi(label, value) {
   return `<div class="kpi"><b>${value}</b><span>${label}</span></div>`;
 }
 
+// Map popup card. Values are escaped here; `actions` render as buttons whose
+// data-action / data-* attributes are handled by one delegated click listener.
+function popupCard({ kicker, title, badge, rows = [], meter, note, actions = [] }) {
+  const badgeHtml = badge
+    ? `<span class="popup-badge ${escapeHtml(badge.tone || "")}">${escapeHtml(badge.text)}</span>`
+    : "";
+  const rowsHtml = rows
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`)
+    .join("");
+  const meterHtml = meter
+    ? `<div class="popup-meter" title="${escapeHtml(meter.label)}">
+         <span class="popup-meter-label">${escapeHtml(meter.label)}</span>
+         <span class="popup-meter-track"><span style="width:${Math.max(0, Math.min(100, meter.percent))}%"></span></span>
+         <strong>${escapeHtml(meter.text)}</strong>
+       </div>`
+    : "";
+  const actionsHtml = actions.length
+    ? `<div class="popup-actions">${actions.map((action) => {
+        const data = Object.entries(action.data || {})
+          .map(([key, value]) => `data-${key}="${escapeHtml(value)}"`).join(" ");
+        return `<button type="button" class="popup-action ${action.primary ? "primary" : ""}" data-action="${escapeHtml(action.action)}" data-icon="${escapeHtml(action.icon || "")}" ${data}>${escapeHtml(action.label)}</button>`;
+      }).join("")}</div>`
+    : "";
+  return `<div class="popup-card">
+    ${kicker ? `<p class="popup-kicker">${escapeHtml(kicker)}</p>` : ""}
+    <div class="popup-head"><h3>${escapeHtml(title)}</h3>${badgeHtml}</div>
+    ${rowsHtml ? `<dl class="popup-rows">${rowsHtml}</dl>` : ""}
+    ${meterHtml}
+    ${note ? `<p class="popup-note">${escapeHtml(note)}</p>` : ""}
+    ${actionsHtml}
+  </div>`;
+}
+
+// School level from Malawi naming conventions (F.P. full primary, J.P. junior
+// primary, CDSS community day secondary). The source has no level field.
+function schoolLevel(name) {
+  const text = String(name || "").toLowerCase().replace(/\s+/g, " ");
+  if (/\b(c?dss|secondary|sec\.?|high school|acad[ae]my|open)\b/.test(text)) return "Secondary";
+  if (/\bj\.? ?p\b/.test(text)) return "Junior primary";
+  if (/\bf\.? ?p\b|\bprimary\b|\bl\. ?e\. ?a\b/.test(text)) return "Primary";
+  return "School";
+}
+
+const POPUP_OPTIONS = {
+  maxWidth: 300,
+  minWidth: 230,
+  className: "card-popup",
+  autoPanPadding: [16, 16],
+};
+
 function mapSymbol(shape, fill, stroke, size = 12) {
   return L.divIcon({
     className: "map-symbol",
@@ -126,16 +234,31 @@ function mapSymbol(shape, fill, stroke, size = 12) {
   });
 }
 
+// Range sliders paint their filled portion from --fill (see styles.css).
+function updateRangeFill(input) {
+  const min = Number(input.min) || 0;
+  const max = Number(input.max) || 100;
+  const percent = max > min ? (Number(input.value) - min) / (max - min) * 100 : 0;
+  input.style.setProperty("--fill", `${Math.max(0, Math.min(100, percent))}%`);
+}
+function updateRangeFills() {
+  document.querySelectorAll('input[type="range"]').forEach(updateRangeFill);
+}
+document.addEventListener("input", (event) => {
+  if (event.target instanceof HTMLInputElement && event.target.type === "range") updateRangeFill(event.target);
+});
+updateRangeFills();
+
 function asFeature(geometry, properties = {}) {
   return { type: "Feature", properties, geometry };
 }
 
 async function init() {
-  const [summary, boundary, facilities, health2026, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers, gapAnalysis, priorityScenario] = await Promise.all([
+  const [summary, boundary, facilities, registry, populationSummary, schools, settlements, cells, roads, waterways, taData, siteLayers, gapAnalysis, priorityScenario] = await Promise.all([
     fetchJson("/api/summary"),
     fetchJson("/api/boundary"),
     fetchJson("/api/facilities"),
-    fetchJson("/api/health-facilities-2026"),
+    fetchJson("/api/registry-facilities"),
     fetchJson("/api/population-summary"),
     fetchJson("/api/schools"),
     fetchJson("/api/settlements"),
@@ -186,10 +309,7 @@ async function init() {
   const cellScore = (properties) =>
     state.priorityScores.get(Number(properties.cell_id)) ?? properties.priority_score;
   const areaStatus = document.getElementById("area-status");
-  const taSearch = document.getElementById("ta-search");
-  const taOptions = document.getElementById("ta-options");
-  const taOptionsToggle = document.getElementById("toggle-ta-options");
-  const clearTASearch = document.getElementById("clear-ta-search");
+  const taSelect = document.getElementById("ta-select");
   const districtButton = document.getElementById("clear-ta");
   const routeSettlementSelect = document.getElementById("route-settlement");
   const routeFacilitySelect = document.getElementById("route-facility");
@@ -338,34 +458,45 @@ async function init() {
     ...facilities.map((facility) => ({
       name: facility.name,
       source: "Baseline",
+      type: facility.facility_type,
       lon: Number(facility.lon),
       lat: Number(facility.lat),
     })),
-    ...health2026.features.map((facility) => ({
+    ...registry.features.map((facility) => ({
       name: facility.properties.name,
-      source: "2026 reference",
+      source: "MHFR registry",
+      type: `${facility.properties.facility_type} · ${facility.properties.ownership}`,
       lon: Number(facility.geometry.coordinates[0]),
       lat: Number(facility.geometry.coordinates[1]),
     })),
   ];
+  // Object -> dropdown index, so map popups can pre-fill the route form.
+  const routeIndexByFacility = new Map();
+  facilities.forEach((facility, index) => routeIndexByFacility.set(facility, index));
+  registry.features.forEach((feature, index) =>
+    routeIndexByFacility.set(feature, facilities.length + index));
+  const settlementIndex = new Map(settlements.features.map((feature, index) => [feature, index]));
   const nearestSchoolBySettlement = new WeakMap();
   const nearestFacilityBySettlement = new WeakMap();
+  let taRankingCache = null;
 
   settlements.features.forEach((settlement, index) => {
     const option = document.createElement("option");
     const [lon, lat] = settlement.geometry.coordinates;
     option.value = String(index);
-    option.textContent = `${settlement.properties.name} · ${settlement.properties.adm3_name || "Dedza"} (${lon.toFixed(3)}, ${lat.toFixed(3)})`;
+    option.textContent = settlement.properties.name;
+    option.dataset.meta = `${settlement.properties.adm3_name || "Dedza"} · ${lat.toFixed(3)}, ${lon.toFixed(3)}`;
     routeSettlementSelect.appendChild(option);
   });
   const baselineFacilities = document.createElement("optgroup");
   baselineFacilities.label = "Baseline health facilities";
   const referenceFacilities = document.createElement("optgroup");
-  referenceFacilities.label = "2026 reference facilities";
+  referenceFacilities.label = "MHFR registry (official MoH list)";
   routeFacilities.forEach((facility, index) => {
     const option = document.createElement("option");
     option.value = String(index);
     option.textContent = facility.name;
+    option.dataset.meta = facility.type || facility.source;
     (facility.source === "Baseline" ? baselineFacilities : referenceFacilities).appendChild(option);
   });
   routeFacilitySelect.append(baselineFacilities, referenceFacilities);
@@ -393,28 +524,67 @@ async function init() {
     }
     const describedBy = select.getAttribute("aria-describedby");
     if (describedBy) trigger.setAttribute("aria-describedby", describedBy);
+    const triggerText = document.createElement("span");
+    triggerText.className = "custom-select-value";
+    trigger.appendChild(triggerText);
 
+    // Long lists get a search box at the top of the menu.
+    const searchable = select.options.length > 8 || select.hasAttribute("data-searchable");
+    const popover = document.createElement("div");
+    popover.className = "custom-select-popover";
+    popover.hidden = true;
+    let search = null;
+    let countLabel = null;
+    if (searchable) {
+      const searchRow = document.createElement("div");
+      searchRow.className = "custom-select-search";
+      search = document.createElement("input");
+      search.type = "search";
+      search.placeholder = "Type to search...";
+      search.setAttribute("aria-label", `Search ${label ? label.textContent.trim().toLocaleLowerCase() : "options"}`);
+      search.setAttribute("aria-controls", `${select.id}-listbox`);
+      search.autocomplete = "off";
+      countLabel = document.createElement("span");
+      countLabel.className = "custom-select-count";
+      countLabel.setAttribute("aria-live", "polite");
+      searchRow.append(search, countLabel);
+      popover.appendChild(searchRow);
+    }
     const menu = document.createElement("div");
     menu.id = `${select.id}-listbox`;
     menu.className = "custom-select-menu";
     menu.setAttribute("role", "listbox");
     menu.setAttribute("aria-labelledby", trigger.id);
-    menu.hidden = true;
-    wrapper.append(trigger, menu);
+    const empty = document.createElement("p");
+    empty.className = "custom-select-empty";
+    empty.textContent = "No matches. Try another spelling.";
+    empty.hidden = true;
+    popover.append(menu, empty);
+    wrapper.append(trigger, popover);
 
     let typeahead = "";
     let typeaheadTimer = null;
-    const options = () => [...menu.querySelectorAll(".custom-select-option")];
+    const options = () => [...menu.querySelectorAll(".custom-select-option:not([hidden])")];
     const sync = () => {
       const selected = select.options[select.selectedIndex];
-      trigger.textContent = selected?.textContent.trim() || "Select an option";
+      triggerText.replaceChildren();
+      const main = document.createElement("span");
+      main.textContent = selected?.textContent.trim() || "Select an option";
+      triggerText.appendChild(main);
+      if (selected?.value && selected.dataset.meta) {
+        const meta = document.createElement("small");
+        meta.textContent = selected.dataset.meta;
+        triggerText.appendChild(meta);
+      }
+      trigger.classList.toggle("is-placeholder", !selected?.value);
       trigger.disabled = select.disabled;
-      options().forEach((option) => {
+      menu.querySelectorAll(".custom-select-option").forEach((option) => {
         option.setAttribute("aria-selected", String(option.dataset.value === select.value));
       });
     };
     const close = (returnFocus = false) => {
-      menu.hidden = true;
+      popover.hidden = true;
+      wrapper.classList.remove("is-open");
       trigger.setAttribute("aria-expanded", "false");
       if (returnFocus) trigger.focus();
     };
@@ -426,12 +596,23 @@ async function init() {
       close(true);
     };
     const addOption = (nativeOption) => {
+      if (nativeOption.hasAttribute("data-placeholder")) return; // prompt text only, not a choice
       const option = document.createElement("div");
       option.className = "custom-select-option";
       option.setAttribute("role", "option");
       option.tabIndex = -1;
       option.dataset.value = nativeOption.value;
-      option.textContent = nativeOption.textContent.trim();
+      const name = document.createElement("span");
+      name.className = "custom-select-option-name";
+      name.textContent = nativeOption.textContent.trim();
+      option.appendChild(name);
+      if (nativeOption.dataset.meta) {
+        const meta = document.createElement("span");
+        meta.className = "custom-select-option-meta";
+        meta.textContent = nativeOption.dataset.meta;
+        option.appendChild(meta);
+      }
+      option.dataset.search = `${nativeOption.textContent} ${nativeOption.dataset.meta || ""}`.toLocaleLowerCase();
       if (nativeOption.disabled) option.setAttribute("aria-disabled", "true");
       menu.appendChild(option);
     };
@@ -450,14 +631,42 @@ async function init() {
       });
       sync();
     };
-    const open = (focusSelected) => {
+    const applyFilter = () => {
+      if (!search) return;
+      const terms = search.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+      let visible = 0;
+      let group = null;
+      let groupHasVisible = false;
+      const finishGroup = () => { if (group) group.hidden = !groupHasVisible; };
+      [...menu.children].forEach((node) => {
+        if (node.classList.contains("custom-select-group")) {
+          finishGroup();
+          group = node;
+          groupHasVisible = false;
+          return;
+        }
+        const match = terms.every((term) => node.dataset.search.includes(term));
+        node.hidden = !match;
+        if (match) { visible += 1; groupHasVisible = true; }
+      });
+      finishGroup();
+      empty.hidden = visible > 0;
+      countLabel.textContent = terms.length ? `${visible} found` : `${visible} total`;
+    };
+    const open = (focusTarget) => {
       if (select.disabled) return;
       renderOptions();
-      menu.hidden = false;
-      trigger.setAttribute("aria-expanded", "true");
-      if (focusSelected) {
-        (options().find((option) => option.dataset.value === select.value) || options()[0])?.focus();
+      if (search) {
+        search.value = "";
+        applyFilter();
       }
+      popover.hidden = false;
+      wrapper.classList.add("is-open");
+      trigger.setAttribute("aria-expanded", "true");
+      const selected = options().find((option) => option.dataset.value === select.value);
+      selected?.scrollIntoView({ block: "nearest" });
+      if (focusTarget === "search" && search) search.focus();
+      else if (focusTarget === "selected") (selected || options()[0])?.focus();
     };
     const focusTypeaheadMatch = (key) => {
       const character = key.toLocaleLowerCase();
@@ -471,25 +680,48 @@ async function init() {
       );
       if (match) match.focus();
     };
+    const isPrintable = (event) =>
+      event.key.length === 1 && event.key !== " " && !event.altKey && !event.ctrlKey && !event.metaKey;
 
     trigger.addEventListener("click", () => {
-      if (menu.hidden) open(false);
+      if (popover.hidden) open(search ? "search" : null);
       else close();
     });
     trigger.addEventListener("keydown", (event) => {
-      if (event.key.length === 1 && event.key !== " " && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      if (isPrintable(event)) {
         event.preventDefault();
-        open(false);
-        focusTypeaheadMatch(event.key);
+        if (search) {
+          open("search");
+          search.value = event.key;
+          applyFilter();
+        } else {
+          open(null);
+          focusTypeaheadMatch(event.key);
+        }
         return;
       }
       if (["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
         event.preventDefault();
-        open(true);
+        open(search ? "search" : "selected");
       } else if (event.key === "Escape") {
         close();
       }
     });
+    if (search) {
+      search.addEventListener("input", applyFilter);
+      search.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          options()[0]?.focus();
+        } else if (event.key === "Enter") {
+          event.preventDefault();
+          choose(options()[0]);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          close(true);
+        }
+      });
+    }
     menu.addEventListener("click", (event) => {
       const option = event.target.closest(".custom-select-option");
       if (option) choose(option);
@@ -497,14 +729,24 @@ async function init() {
     menu.addEventListener("keydown", (event) => {
       const list = options();
       const index = list.indexOf(document.activeElement);
-      if (event.key.length === 1 && event.key !== " " && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      if (isPrintable(event)) {
         event.preventDefault();
-        focusTypeaheadMatch(event.key);
+        if (search) {
+          search.focus();
+          search.value += event.key;
+          applyFilter();
+        } else {
+          focusTypeaheadMatch(event.key);
+        }
       } else if (event.key === "Escape") {
         event.preventDefault();
         close(true);
       } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
+        if (event.key === "ArrowUp" && index <= 0 && search) {
+          search.focus();
+          return;
+        }
         const direction = event.key === "ArrowDown" ? 1 : -1;
         list[(index + direction + list.length) % list.length]?.focus();
       } else if (event.key === "Home" || event.key === "End") {
@@ -513,6 +755,8 @@ async function init() {
       } else if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         choose(document.activeElement);
+      } else if (event.key === "Tab") {
+        close();
       }
     });
     document.addEventListener("click", (event) => {
@@ -525,7 +769,7 @@ async function init() {
     }).observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "label"] });
     renderOptions();
   }
-  [routeSettlementSelect, routeFacilitySelect, scenarioTypeInput].forEach(enhanceSelect);
+  [taSelect, routeSettlementSelect, routeFacilitySelect, scenarioTypeInput].forEach(enhanceSelect);
 
   function enhanceNumberInput(input) {
     const label = document.querySelector(`label[for="${input.id}"]`);
@@ -613,8 +857,8 @@ async function init() {
     });
   }
 
-  function selectedFacilities2026() {
-    return health2026.features.filter((facility) => intersectsSelectedArea(facility));
+  function selectedRegistryFacilities() {
+    return registry.features.filter((facility) => intersectsSelectedArea(facility));
   }
 
   function selectedSchools() {
@@ -667,7 +911,7 @@ async function init() {
       return {
         name,
         facilities: facilities.filter((facility) => includes(turf.point([facility.lon, facility.lat]))).length,
-        facilities2026: health2026.features.filter((feature) => includes(feature)).length,
+        registryFacilities: registry.features.filter((feature) => includes(feature)).length,
         schools: schools.features.filter((feature) => includes(feature)).length,
         settlements: taSettlements.length,
         schoolReach,
@@ -696,10 +940,10 @@ async function init() {
       const row = document.createElement("tr");
       row.className = "rec-row";
       row.innerHTML = `
-        <td class="priority-rank">${priorityRank ?? "—"}</td>
+        <td class="ta-rank-cell">${priorityRank ? `<span class="ta-rank">${priorityRank}</span>` : "—"}</td>
         <td>${escapeHtml(metrics.name)}</td>
         <td>${metrics.facilities}</td>
-        <td>${metrics.facilities2026}</td>
+        <td>${metrics.registryFacilities}</td>
         <td>${metrics.schools}</td>
         <td>${metrics.settlements}</td>
         <td>${metrics.schoolReach}/${metrics.settlements}</td>
@@ -775,9 +1019,11 @@ async function init() {
       `<strong>Health access:</strong> ${metrics.unservedCells} grid cells (${metrics.unservedArea.toFixed(0)} km²) are beyond the 8 km baseline threshold.`,
       `<strong>Education proximity:</strong> ${metrics.schoolReach} of ${active.settlements.length} mapped settlements are within ${schoolRadiusKm} km straight-line distance of a school.`,
       `<strong>Road-distance access proxy:</strong> ${travelProxyScore}/100 when adjusting for facility distance, road network reach and mapped waterway context.`,
-      `<strong>Facility sources:</strong> ${active.facilities.length} baseline facilities inform the access grid; ${active.health2026.features.length} 2026 reference facilities are displayed separately.`,
+      `<strong>Facility sources:</strong> ${active.facilities.length} baseline facilities inform the access grid; ${active.registry.features.length} operational facilities from the official MHFR registry are shown separately.`,
     ];
     document.getElementById("briefing-signals").innerHTML = signals.map((signal) => `<li>${signal}</li>`).join("");
+    document.getElementById("briefing-actions").innerHTML = buildRecommendedActions(active)
+      .map((action) => `<li>${action.html}</li>`).join("");
 
     const tbody = document.getElementById("briefing-priorities");
     tbody.replaceChildren();
@@ -793,47 +1039,117 @@ async function init() {
     });
   }
 
-  function closeTAOptions() {
-    taOptions.hidden = true;
-    taOptions.replaceChildren();
-    taSearch.setAttribute("aria-expanded", "false");
-    taOptionsToggle.setAttribute("aria-expanded", "false");
+  // Concrete, data-backed actions for the selected area. Each item carries
+  // HTML for the briefing and plain text for the CSV export.
+  function buildRecommendedActions(active) {
+    const actions = [];
+    const areaName = state.name || "Dedza District";
+    const fmt = (value) => Math.round(value).toLocaleString();
+    const button = (label, attrs) => `<button type="button" class="inline-action" ${attrs}>${escapeHtml(label)}</button>`;
+
+    taRankingCache ||= buildTAComparison();
+    const ranked = taRankingCache.filter((row) => row.hasPopulationData);
+    if (!state.name && ranked.length) {
+      const top = ranked[0];
+      const share = top.populationTotal ? top.populationUnserved / top.populationTotal * 100 : 0;
+      const text = `Prioritise ${top.name}: about ${fmt(top.populationUnserved)} people (${share.toFixed(0)}% of the TA) live more than 8 km from a health facility, the largest gap in the district.`;
+      actions.push({ text, html: `<strong>Prioritise ${escapeHtml(top.name)}:</strong> about ${fmt(top.populationUnserved)} people (${share.toFixed(0)}% of the TA) live more than 8 km from a health facility, the largest gap in the district. ${button("Open TA", `data-action="select-ta" data-value="${escapeHtml(top.name)}"`)}` });
+    } else if (state.name) {
+      const position = ranked.findIndex((row) => row.name === state.name);
+      if (position >= 0) {
+        const row = ranked[position];
+        const text = `${areaName} ranks #${position + 1} of ${ranked.length} populated areas in Dedza for people more than 8 km from a health facility (about ${fmt(row.populationUnserved)}).`;
+        actions.push({ text, html: `<strong>Priority level:</strong> ${escapeHtml(text)}` });
+      }
+    }
+
+    const healthSite = computeSuggestedSites(active, "health", 5, 1)[0];
+    if (healthSite) {
+      const text = `Plan a new health centre ${nearPlace(healthSite.site.properties.name)}: a 5 km catchment there would cover about ${fmt(healthSite.people)} people in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care.`;
+      actions.push({ text, html: `<strong>Best health-centre location:</strong> ${escapeHtml(nearPlace(healthSite.site.properties.name))}. A 5 km catchment there would cover about ${fmt(healthSite.people)} people in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care. ${button("Compare top 3 sites", 'data-action="suggest" data-value="health" data-radius="5"')}` });
+    }
+
+    const remote = active.settlements
+      .map((settlement) => ({ settlement, distance: nearestFacilityBySettlement.get(settlement)?.distance ?? Infinity }))
+      .filter(({ distance }) => distance > 8)
+      .sort((a, b) => (Number(b.settlement.properties.population) || 0) - (Number(a.settlement.properties.population) || 0))
+      .slice(0, 3);
+    if (remote.length) {
+      const list = remote.map(({ settlement, distance }) => `${settlement.properties.name} (${fmt(Number(settlement.properties.population) || 0)} people, ${distance.toFixed(1)} km)`);
+      const text = `Schedule outreach or mobile clinics for the largest settlements beyond 8 km: ${list.join("; ")}.`;
+      const htmlList = remote.map(({ settlement, distance }) => {
+        const [lon, lat] = settlement.geometry.coordinates;
+        return `${button(settlement.properties.name, `data-action="zoom" data-value="${lon},${lat}" title="Zoom to settlement"`)} ${fmt(Number(settlement.properties.population) || 0)} people, ${distance.toFixed(1)} km`;
+      });
+      actions.push({ text, html: `<strong>Outreach until a facility is built:</strong> the largest settlements beyond 8 km are ${htmlList.join("; ")}.` });
+    }
+
+    const schoolSite = computeSuggestedSites(active, "school", schoolRadiusKm, 1)[0];
+    const schoolGapPeople = computeSuggestedSites(active, "school", schoolRadiusKm, 50)
+      .reduce((sum, pick) => sum + pick.people, 0);
+    if (schoolSite && schoolGapPeople >= 1000) {
+      const text = `Assess a new school ${nearPlace(schoolSite.site.properties.name)}: it would bring about ${fmt(schoolSite.people)} people in ${plural(schoolSite.settlementCount, "settlement")} within ${schoolRadiusKm} km of a school.`;
+      actions.push({ text, html: `<strong>Best school location:</strong> ${escapeHtml(nearPlace(schoolSite.site.properties.name))}, bringing about ${fmt(schoolSite.people)} people in ${plural(schoolSite.settlementCount, "settlement")} within ${schoolRadiusKm} km of a school. ${button("Compare top 3 sites", `data-action="suggest" data-value="school" data-radius="${schoolRadiusKm}"`)}` });
+    } else {
+      const text = schoolGapPeople > 0
+        ? `Only about ${fmt(schoolGapPeople)} people live more than ${schoolRadiusKm} km from a school, so new school sites are not the main gap here; direct education funds to classrooms, teachers and quality. Lower the School access radius to test a stricter standard.`
+        : `Every mapped settlement is within ${schoolRadiusKm} km of a school; direct education funds to classrooms, teachers and quality rather than new sites.`;
+      actions.push({ text, html: `<strong>Schools:</strong> ${escapeHtml(text)}` });
+    }
+
+    const verify = "Verify land, staffing and community needs on the ground before committing funds; these are screening results.";
+    actions.push({ text: verify, html: `<em>${escapeHtml(verify)}</em>` });
+    return actions;
   }
 
-  function showTAOptions(query) {
-    const matches = taNames.filter((name) => name.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
-    taOptions.replaceChildren();
-    matches.forEach((name) => {
-      const option = document.createElement("button");
-      option.type = "button";
-      option.className = "ta-option";
-      option.setAttribute("role", "option");
-      option.setAttribute("aria-selected", String(name === state.name));
+  // TA dropdown options, alphabetical, each with its screening rank and gap size.
+  function populateTASelect(rows) {
+    const rankByName = new Map();
+    let rank = 0;
+    rows.forEach((row) => { if (row.hasPopulationData) rankByName.set(row.name, ++rank); });
+    const rowByName = new Map(rows.map((row) => [row.name, row]));
+    const fragment = document.createDocumentFragment();
+    taNames.forEach((name) => {
+      const row = rowByName.get(name);
+      const option = document.createElement("option");
+      option.value = name;
       option.textContent = name;
-      option.addEventListener("click", () => {
-        selectTA(name);
-        taSearch.focus();
-      });
-      taOptions.appendChild(option);
+      const count = row?.facilities ?? 0;
+      const facilityText = `${count} ${count === 1 ? "facility" : "facilities"}`;
+      option.dataset.meta = row?.hasPopulationData
+        ? `Priority #${rankByName.get(name)} · ${Math.round(row.populationUnserved).toLocaleString()} people > 8 km · ${facilityText}`
+        : `${facilityText} · no population summary`;
+      fragment.appendChild(option);
     });
-    taOptions.hidden = matches.length === 0;
-    taSearch.setAttribute("aria-expanded", String(!taOptions.hidden));
-    taOptionsToggle.setAttribute("aria-expanded", String(!taOptions.hidden));
-    return matches.length;
+    taSelect.querySelectorAll("option:not([value=''])").forEach((option) => option.remove());
+    taSelect.appendChild(fragment);
+    taSelect.value = state.name || "";
+  }
+
+  // Reflect the current area in the dropdown without re-triggering selection.
+  function syncTASelect() {
+    if ((taSelect.value || null) === state.name) return;
+    taSelect.value = state.name || "";
+    taSelect.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   function renderSettlementAccess(areaSettlements) {
     const tbody = document.getElementById("settlement-access-rows");
     tbody.replaceChildren();
-    areaSettlements.forEach((settlement) => {
+    // Most remote from health care first, so the gaps are at the top.
+    const ordered = [...areaSettlements].sort((a, b) =>
+      (nearestFacilityBySettlement.get(b)?.distance ?? Infinity) - (nearestFacilityBySettlement.get(a)?.distance ?? Infinity));
+    ordered.forEach((settlement) => {
       const school = nearestSchoolBySettlement.get(settlement);
       const facility = nearestFacilityBySettlement.get(settlement);
       const [lon, lat] = settlement.geometry.coordinates;
+      const population = Number(settlement.properties.population) || 0;
       const row = document.createElement("tr");
       row.className = "rec-row";
       row.innerHTML = `
         <td>${escapeHtml(settlement.properties.name)}</td>
         <td>${escapeHtml(settlement.properties.adm3_name)}</td>
+        <td>${population ? Math.round(population).toLocaleString() : "—"}</td>
         <td>${escapeHtml(school?.school.properties.name || "No mapped school")}</td>
         <td>${school ? `${school.distance.toFixed(1)} km` : "—"}</td>
         <td>${escapeHtml(facility?.facility.name || "No mapped facility")}</td>
@@ -864,6 +1180,75 @@ async function init() {
       type: candidate.type,
       radius: candidate.radius,
     };
+  }
+
+  // Fast planar distance (km); accurate to well under 1% across Dedza.
+  function quickKm([lon1, lat1], [lon2, lat2]) {
+    const dx = (lon2 - lon1) * 111.32 * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
+    const dy = (lat2 - lat1) * 110.574;
+    return Math.hypot(dx, dy);
+  }
+
+  // Greedy maximal-coverage site search: repeatedly pick the settlement location
+  // whose radius brings the most not-yet-served residents within reach.
+  // Demand = GRID3 settlements beyond the radius from every existing service of
+  // that type (and from candidates already on the map).
+  function computeSuggestedSites(active, type, radiusKm, count = 3) {
+    const nearest = type === "school" ? nearestSchoolBySettlement : nearestFacilityBySettlement;
+    const existingCandidates = state.scenarios
+      .filter((candidate) => candidate.type === type)
+      .map((candidate) => candidate.point.geometry.coordinates);
+    const demand = active.settlements.filter((settlement) => {
+      if (!(Number(settlement.properties.population) > 0)) return false;
+      if ((nearest.get(settlement)?.distance ?? Infinity) <= radiusKm) return false;
+      const coords = settlement.geometry.coordinates;
+      return !existingCandidates.some((site) => quickKm(site, coords) <= radiusKm);
+    });
+    if (!demand.length) return [];
+    const reach = active.settlements.map((site) => {
+      const origin = site.geometry.coordinates;
+      const covered = [];
+      demand.forEach((settlement, index) => {
+        if (quickKm(origin, settlement.geometry.coordinates) <= radiusKm) covered.push(index);
+      });
+      return covered;
+    });
+    const isCovered = new Array(demand.length).fill(false);
+    const picks = [];
+    for (let k = 0; k < count; k += 1) {
+      let best = null;
+      reach.forEach((covered, siteIndex) => {
+        let people = 0;
+        let settlementCount = 0;
+        covered.forEach((index) => {
+          if (isCovered[index]) return;
+          people += Number(demand[index].properties.population);
+          settlementCount += 1;
+        });
+        if (people > 0 && (!best || people > best.people)) best = { siteIndex, people, settlementCount };
+      });
+      if (!best) break;
+      const covered = reach[best.siteIndex].filter((index) => !isCovered[index]);
+      covered.forEach((index) => { isCovered[index] = true; });
+      const site = active.settlements[best.siteIndex];
+      picks.push({
+        site,
+        coordinates: site.geometry.coordinates,
+        people: best.people,
+        settlementCount: best.settlementCount,
+        settlements: covered.map((index) => demand[index]),
+      });
+    }
+    return picks;
+  }
+
+  function nearestOf(features, coordinates) {
+    let best = null;
+    features.forEach((feature) => {
+      const distance = quickKm(coordinates, feature.geometry.coordinates);
+      if (!best || distance < best.distance) best = { feature, distance };
+    });
+    return best;
   }
 
   function getScenarioRoadMetrics(active, candidate) {
@@ -918,9 +1303,9 @@ async function init() {
     const layer = layers.scenario;
     layer.clearLayers();
     scenarioCandidateList.replaceChildren();
-    scenarioResults.hidden = state.scenarios.length === 0;
+    const hasScenarioResults = state.scenarios.length > 0 && !state.scenarioLayerHidden;
+    scenarioResults.hidden = !hasScenarioResults;
     const mapContainer = map.getContainer();
-    const hasScenarioResults = state.scenarios.length > 0;
     if (mapContainer.classList.contains("has-scenario-results") !== hasScenarioResults) {
       mapContainer.classList.toggle("has-scenario-results", hasScenarioResults);
       requestAnimationFrame(() => map.invalidateSize({ pan: false }));
@@ -940,6 +1325,13 @@ async function init() {
         : "No candidate sites yet. Add a site on the map to compare its potential population reach.";
       return;
     }
+
+    // Rank estimated candidates by residents newly brought within reach.
+    const rankedCandidates = state.scenarios
+      .filter((candidate) => candidate.populationEstimate)
+      .sort((a, b) => b.populationEstimate.additional_population_estimate - a.populationEstimate.additional_population_estimate);
+    const rankById = new Map(rankedCandidates.map((candidate, rank) => [candidate.id, rank + 1]));
+    const showRanks = rankedCandidates.length > 1;
 
     state.scenarios.forEach((candidate, index) => {
       const [lon, lat] = candidate.point.geometry.coordinates;
@@ -995,7 +1387,44 @@ async function init() {
         map.setView([lat, lon], 12);
         candidate.marker?.openPopup();
       });
+      const rank = rankById.get(candidate.id);
+      if (showRanks && rank) {
+        const badge = document.createElement("span");
+        badge.className = `scenario-rank${rank === 1 ? " best" : ""}`;
+        badge.textContent = rank === 1 ? "Best reach" : `#${rank}`;
+        focus.appendChild(badge);
+      }
       card.appendChild(focus);
+      if (candidate.suggestion) {
+        const origin = document.createElement("div");
+        origin.className = "scenario-origin";
+        origin.textContent = `Suggested by the system, ${nearPlace(candidate.suggestion.name)}`;
+        card.appendChild(origin);
+      }
+      if (showRanks && rank === 1) {
+        const decision = document.createElement("p");
+        decision.className = "scenario-decision";
+        const runnerUp = rankedCandidates[1];
+        const margin = Math.round(
+          candidate.populationEstimate.additional_population_estimate
+          - runnerUp.populationEstimate.additional_population_estimate
+        );
+        decision.textContent = `Recommended of the ${rankedCandidates.length} sites compared: reaches ${margin.toLocaleString()} more people than Candidate ${runnerUp.id}.`;
+        card.appendChild(decision);
+      }
+
+      // Duplication check: is an existing service already close to this site?
+      const existingPool = candidate.type === "school" ? schools.features : registry.features;
+      const closest = nearestOf(existingPool, candidate.point.geometry.coordinates);
+      if (closest) {
+        const nearby = document.createElement("p");
+        nearby.className = "scenario-screening-note";
+        const what = candidate.type === "school" ? "school" : "operational facility (MHFR registry, any owner)";
+        const owner = candidate.type === "school" ? "" : closest.feature.properties.ownership ? ` · ${closest.feature.properties.ownership}` : "";
+        nearby.textContent = `Nearest existing ${what}: ${closest.feature.properties.name}${owner}, ${closest.distance.toFixed(1)} km.`
+          + (closest.distance < candidate.radius / 2 ? " Close enough to risk duplicating it; consider upgrading that site instead." : "");
+        card.appendChild(nearby);
+      }
 
       const siteScreening = document.createElement("p");
       siteScreening.className = "scenario-screening-note";
@@ -1217,7 +1646,7 @@ async function init() {
     const unservedPopulation = population.unserved || 0;
     rows.push(["summary", areaLabel, "schools", active.schools.length]);
     rows.push(["summary", areaLabel, "health facilities", active.facilities.length]);
-    rows.push(["summary", areaLabel, "2026 health reference facilities", active.health2026.features.length]);
+    rows.push(["summary", areaLabel, "MHFR registry facilities (operational)", active.registry.features.length]);
     rows.push(["summary", areaLabel, "mapped settlements", active.settlements.length]);
     rows.push(["summary", areaLabel, "settlements over 5 km from health", healthGaps]);
     rows.push(["summary", areaLabel, "unserved health grid cells", unservedCells]);
@@ -1227,7 +1656,7 @@ async function init() {
     rows.push(["source", areaLabel, "population dataset", "WorldPop 2025 R2025A v1; 100 m population-count raster; CC BY 4.0"]);
     rows.push(["method", areaLabel, "population coverage", "Raster cells assigned to existing 3 km straight-line health-access classes; not network travel or school access"]);
     rows.push(["source", areaLabel, "health baseline", "Existing MOH facility dataset used to derive the 3 km access grid"]);
-    rows.push(["source", areaLabel, "2026 health reference", "ArcGIS Malawi Health 2026 FeatureServer; separate comparison layer; license/provenance requires confirmation"]);
+    rows.push(["source", areaLabel, "MHFR registry", "Malawi Health Facility Registry (zipatala.health.gov.mw), Ministry of Health; operational facilities; separate reference layer"]);
     rows.push([
       "source",
       areaLabel,
@@ -1238,6 +1667,18 @@ async function init() {
     ]);
     schoolCoverage.forEach(([threshold, count]) => {
       rows.push(["school coverage", areaLabel, `settlements within ${threshold} km`, `${count}/${active.settlements.length}`]);
+    });
+    buildRecommendedActions(active).forEach((action, index) => {
+      rows.push(["recommendation", areaLabel, `action ${index + 1}`, action.text]);
+    });
+    const ranked = state.scenarios
+      .filter((candidate) => candidate.populationEstimate)
+      .sort((a, b) => b.populationEstimate.additional_population_estimate - a.populationEstimate.additional_population_estimate);
+    ranked.forEach((candidate, index) => {
+      rows.push([
+        "candidate ranking", areaLabel, `rank ${index + 1}`,
+        `Candidate ${candidate.id}${candidate.suggestion ? ` (suggested ${nearPlace(candidate.suggestion.name)})` : ""}: +${Math.round(candidate.populationEstimate.additional_population_estimate)} people`,
+      ]);
     });
 
     state.scenarios.forEach((candidate) => {
@@ -1338,7 +1779,7 @@ async function init() {
     ["served", "underserved", "unserved"].forEach((category) => {
       const values = result.coverage[category];
       const row = document.createElement("div");
-      row.className = "gap-analysis-row";
+      row.className = `gap-analysis-row ${category}`;
       const label = document.createElement("span");
       label.textContent = category;
       const summary = document.createElement("strong");
@@ -1347,6 +1788,7 @@ async function init() {
       row.append(label, summary);
       gapAnalysisResults.appendChild(row);
     });
+    updateRangeFills();
   }
 
   function renderCellCoverage(activeCells) {
@@ -1365,17 +1807,40 @@ async function init() {
       },
       onEachFeature: (feature, layer) => {
         const p = feature.properties;
-        const coverage =
-          state.gapCoverage.get(Number(p.cell_id)) || p.coverage;
-        layer.bindPopup(
-          `<strong>Cell ${escapeHtml(p.cell_id)}</strong><br>
-           Health access (${state.gapServedKm}/${state.gapUnderservedKm} km scenario): ${escapeHtml(coverage)}<br>
-           Nearest facility: ${p.dist_km == null ? "Unavailable" : `${escapeHtml(p.dist_km)} km`}<br>
-           Road length: ${escapeHtml(p.road_km)} km<br>
-           Mapped waterway length: ${escapeHtml(p.water_km)} km<br>
-           Priority score (current weights): ${escapeHtml(cellScore(p))}<br>
-           Baseline score (55/25/20): ${escapeHtml(p.priority_score)}`
-        );
+        const coverageOf = () => state.gapCoverage.get(Number(p.cell_id)) || p.coverage;
+        const distText = p.dist_km == null ? "unavailable" : `${p.dist_km} km`;
+        // Built on open so it always reflects the current what-if settings.
+        layer.bindPopup(() => {
+          const score = Number(cellScore(p));
+          const center = turf.pointOnFeature(feature).geometry.coordinates;
+          return popupCard({
+            kicker: `Grid cell ${p.cell_id} · ${Number(p.area_km2).toFixed(1)} km²`,
+            title: "Health access",
+            badge: { text: coverageOf(), tone: coverageOf() },
+            rows: [
+              ["Nearest facility", distText],
+              ["Road length in cell", `${p.road_km} km`],
+              ["Mapped waterways", `${p.water_km} km`],
+              ["Baseline score (55/25/20)", p.priority_score],
+            ],
+            meter: { label: "Priority score (current weights)", percent: score / 2 * 100, text: score.toFixed(3) },
+            note: planningPrompt(p),
+            actions: [
+              { action: "add-site", label: "Add candidate site here", icon: "pin", primary: true, data: { lat: center[1], lng: center[0] } },
+              { action: "zoom", label: "Zoom in", icon: "zoom", data: { lat: center[1], lng: center[0], zoom: 12 } },
+            ],
+          });
+        }, POPUP_OPTIONS);
+        layer.bindTooltip(() => `<strong>${escapeHtml(coverageOf())}</strong> · ${escapeHtml(distText)} to care`, {
+          sticky: true, direction: "top", offset: [0, -8], className: "cell-tooltip", opacity: 1,
+        });
+        layer.on("mouseover", () => {
+          layer.setStyle({ weight: 2.5, color: "#f4c542", fillOpacity: 0.62 });
+          layer.bringToFront();
+        });
+        layer.on("mouseout", () => {
+          layer.setStyle({ weight: 0.4, color: "#0f1c1a", fillOpacity: 0.45 });
+        });
       },
     }).addTo(layers.cells);
   }
@@ -1407,7 +1872,22 @@ async function init() {
         zIndexOffset: 1000 - rank,
         title: `Priority rank ${rank}`,
       })
-        .bindPopup(`<strong>Priority rank ${rank} · cell ${escapeHtml(p.cell_id)}</strong><br>Score (current weights): ${escapeHtml(cellScore(p))}<br>${escapeHtml(planningPrompt(p))}<br>Road-distance access proxy: ${escapeHtml(accessScore)}/100`)
+        .bindPopup(popupCard({
+          kicker: `Priority rank ${rank} of 12 · grid cell ${p.cell_id}`,
+          title: isNew ? "New in top 12 with these weights" : "Highest-priority health gap",
+          badge: { text: p.coverage, tone: p.coverage },
+          rows: [
+            ["Nearest facility", p.dist_km == null ? "unavailable" : `${p.dist_km} km`],
+            ["Road length in cell", `${p.road_km} km`],
+            ["Road-distance access proxy", `${accessScore}/100`],
+          ],
+          meter: { label: "Priority score (current weights)", percent: Number(cellScore(p)) / 2 * 100, text: Number(cellScore(p)).toFixed(3) },
+          note: planningPrompt(p),
+          actions: [
+            { action: "add-site", label: "Add candidate site here", icon: "pin", primary: true, data: { lat: point[1], lng: point[0] } },
+            { action: "zoom", label: "Zoom in", icon: "zoom", data: { lat: point[1], lng: point[0], zoom: 12 } },
+          ],
+        }), POPUP_OPTIONS)
         .addTo(layers.priority);
 
       const row = document.createElement("tr");
@@ -1446,18 +1926,25 @@ async function init() {
       }),
     }).addTo(layers.roads);
 
-    L.geoJSON(active.health2026, {
+    L.geoJSON(active.registry, {
       pointToLayer: (_, latlng) => L.marker(
         latlng,
         { icon: mapSymbol("diamond", "#8bd4c4", "#176a7b", 11) }
       ),
       onEachFeature: (feature, layer) => {
         const p = feature.properties;
-        layer.bindPopup(
-          `<strong>${escapeHtml(p.name)}</strong><br>ArcGIS Malawi Health 2026 reference<br>${escapeHtml(p.ownership)}<br>${escapeHtml(p.dho)}`
-        );
+        layer.bindPopup(popupCard({
+          kicker: "MHFR · official facility registry",
+          title: p.name,
+          badge: { text: p.facility_type, tone: "reference" },
+          rows: [["Ownership", p.ownership], ["MHFR code", p.facility_code]],
+          note: "Reference layer from the Ministry of Health registry; the coverage grid uses the MOH baseline facilities.",
+          actions: [
+            { action: "route-to", label: "Route to here", icon: "route", primary: true, data: { index: routeIndexByFacility.get(feature) } },
+          ],
+        }), POPUP_OPTIONS);
       },
-    }).addTo(layers.health2026);
+    }).addTo(layers.registry);
 
     L.geoJSON(active.waterways, {
       style: { color: "#51b5d5", weight: 1.6, opacity: 0.9 },
@@ -1467,7 +1954,16 @@ async function init() {
       L.marker([facility.lat, facility.lon], {
         icon: mapSymbol("circle", "#fff", "#cf5c36", facility.facility_type === "Hospital" ? 14 : 10),
       })
-        .bindPopup(`<strong>${escapeHtml(facility.name)}</strong><br>${escapeHtml(facility.facility_type)}`)
+        .bindPopup(popupCard({
+          kicker: "MOH baseline health facility",
+          title: facility.name,
+          badge: { text: facility.facility_type, tone: "facility" },
+          rows: [["Owner", facility.owner], ["District health office", facility.dho]],
+          actions: [
+            { action: "route-to", label: "Route to here", icon: "route", primary: true, data: { index: routeIndexByFacility.get(facility) } },
+            { action: "zoom", label: "Zoom in", icon: "zoom", data: { lat: facility.lat, lng: facility.lon, zoom: 13 } },
+          ],
+        }), POPUP_OPTIONS)
         .addTo(layers.facilities);
 
       L.circle([facility.lat, facility.lon], {
@@ -1484,7 +1980,15 @@ async function init() {
       L.marker([lat, lon], {
         icon: mapSymbol("square", "#f4a261", "#873e2e", 8),
       })
-        .bindPopup(`<strong>${escapeHtml(school.properties.name)}</strong><br>School<br>Status: ${escapeHtml(school.properties.status || "Not recorded")}`)
+        .bindPopup(popupCard({
+          kicker: "School",
+          title: school.properties.name,
+          badge: { text: schoolLevel(school.properties.name), tone: "school" },
+          rows: [["School ID", school.properties.school_id], ["Status", school.properties.status]],
+          actions: [
+            { action: "zoom", label: "Zoom in", icon: "zoom", data: { lat, lng: lon, zoom: 14 } },
+          ],
+        }), POPUP_OPTIONS)
         .addTo(layers.schools);
     });
 
@@ -1494,18 +1998,34 @@ async function init() {
       const nearest = nearestSchoolBySettlement.get(settlement);
       const withinSchoolRadius = nearest && nearest.distance <= schoolRadiusKm;
       const status = withinSchoolRadius ? "Within" : "Beyond";
-      const nearestSchoolInfo = nearest
-        ? `Nearest school: ${escapeHtml(nearest.school.properties.name)} (${nearest.distance.toFixed(1)} km straight-line)`
-        : "No Dedza school point available";
-      L.marker([lat, lon], {
-        icon: mapSymbol(
-          "circle",
-          withinSchoolRadius ? "#8bd4c4" : "#e76f51",
-          withinSchoolRadius ? "#174b43" : "#7b2c25",
-          9
-        ),
+      const buildings = settlement.properties.building_count;
+      // Vector circles (cheap for ~1,200 points), sized by estimated population.
+      L.circleMarker([lat, lon], {
+        radius: Math.min(13, 3 + Math.sqrt(Number(population) || 0) / 18),
+        color: withinSchoolRadius ? "#174b43" : "#7b2c25",
+        weight: 1.5,
+        fillColor: withinSchoolRadius ? "#8bd4c4" : "#e76f51",
+        fillOpacity: 0.85,
       })
-        .bindPopup(`<strong>${escapeHtml(settlement.properties.name)}</strong><br>${escapeHtml(settlement.properties.place || "Settlement")}<br>${escapeHtml(settlement.properties.adm3_name)}<br>${nearestSchoolInfo}<br>${status} ${schoolRadiusKm} km radius${population ? `<br>OSM population tag: ${escapeHtml(population)}` : ""}`)
+        .bindPopup(popupCard({
+          kicker: `${settlement.properties.place || "Settlement"} · ${settlement.properties.adm3_name || "Dedza"}`,
+          title: settlement.properties.name,
+          badge: { text: `${status} ${schoolRadiusKm} km of a school`, tone: withinSchoolRadius ? "served" : "unserved" },
+          rows: [
+            ["Est. population (WorldPop 2025)", population ? Math.round(population).toLocaleString() : null],
+            ["Buildings (GRID3)", buildings ? Number(buildings).toLocaleString() : null],
+            ["Nearest school", nearest ? `${nearest.school.properties.name} (${nearest.distance.toFixed(1)} km)` : "none mapped"],
+            ["Nearest health facility", nearestFacilityBySettlement.get(settlement)
+              ? `${nearestFacilityBySettlement.get(settlement).facility.name} (${nearestFacilityBySettlement.get(settlement).distance.toFixed(1)} km)`
+              : "none mapped"],
+          ],
+          note: settlement.properties.source === "GRID3 v3.0"
+            ? "Settlement extent from GRID3 v3.0; the name is borrowed from the nearest OSM place. Distances are straight-line."
+            : "Distances are straight-line.",
+          actions: [
+            { action: "route-from", label: "Route from here", icon: "route", primary: true, data: { index: settlementIndex.get(settlement) } },
+          ],
+        }), POPUP_OPTIONS)
         .addTo(layers.settlements);
     });
 
@@ -1561,7 +2081,7 @@ async function init() {
     });
     document.getElementById("kpis").innerHTML = [
       kpi("Health facilities · baseline", active.facilities.length),
-      kpi("Health facilities · 2026 reference", active.health2026.features.length),
+      kpi("Health facilities · MHFR registry", active.registry.features.length),
       kpi("Schools", active.schools.length),
       kpi("Settlements", active.settlements.length),
       kpi(`Settlements within ${schoolRadiusKm} km of a school`, `${withinSchoolRadius}/${schoolDistances.length}`),
@@ -1578,7 +2098,7 @@ async function init() {
     ].join("");
 
     const areaLabel = state.name ? escapeHtml(state.name) : "Dedza District";
-    areaStatus.textContent = `${areaLabel} · ${active.schools.length} schools · ${active.facilities.length} baseline / ${active.health2026.features.length} separate 2026 health references · ${withinSchoolRadius}/${schoolDistances.length} settlements within ${schoolRadiusKm} km of school · ${beyondHealthRadius}/${healthDistances.length} settlements > 5 km from baseline health`;
+    areaStatus.textContent = `${areaLabel} · ${active.schools.length} schools · ${active.facilities.length} baseline / ${active.registry.features.length} MHFR registry facilities · ${withinSchoolRadius}/${schoolDistances.length} settlements within ${schoolRadiusKm} km of school · ${beyondHealthRadius}/${healthDistances.length} settlements > 5 km from baseline health`;
     document.getElementById("school-access-status").textContent = `Updated: ${withinSchoolRadius} of ${schoolDistances.length} mapped settlements are within ${schoolRadiusKm} km of a school; settlement dots show within/beyond this threshold.`;
     renderScenario(active);
   }
@@ -1588,7 +2108,7 @@ async function init() {
     return {
       cells: cells.features.filter(inArea),
       facilities: selectedFacilities(),
-      health2026: { type: "FeatureCollection", features: selectedFacilities2026() },
+      registry: { type: "FeatureCollection", features: selectedRegistryFacilities() },
       schools: selectedSchools(),
       settlements: selectedSettlements(),
       roads: { type: "FeatureCollection", features: roads.features.filter(inArea) },
@@ -1750,6 +2270,8 @@ async function init() {
     clearRouteMetrics();
     routeControlStatus.textContent = "Calculating the shortest mapped-road route. The first request may take several seconds to prepare the road network.";
     findRouteButton.textContent = "Finding route...";
+    findRouteButton.classList.add("is-loading");
+    findRouteButton.setAttribute("aria-busy", "true");
     try {
       const response = await fetch("/api/route", {
         method: "POST",
@@ -1799,6 +2321,8 @@ async function init() {
       routeSettlementSelect.disabled = false;
       routeFacilitySelect.disabled = false;
       findRouteButton.textContent = "Find route";
+      findRouteButton.classList.remove("is-loading");
+      findRouteButton.removeAttribute("aria-busy");
       updateFindRouteButton();
     }
   }
@@ -1813,10 +2337,8 @@ async function init() {
     state.placingScenario = false;
     state.scenarioResultsCollapsed = false;
     placeScenarioButton.textContent = "Add site on map";
-    closeTAOptions();
     districtButton.setAttribute("aria-pressed", "false");
-    taSearch.value = state.name;
-    clearTASearch.hidden = false;
+    syncTASelect();
     const areaLayer = L.geoJSON({ type: "FeatureCollection", features: areas });
     map.fitBounds(areaLayer.getBounds().pad(0.12));
     render(activeData());
@@ -1826,51 +2348,17 @@ async function init() {
   function selectDistrict() {
     state.name = null;
     state.areas = [];
-    taSearch.value = "";
-    clearTASearch.hidden = true;
-    closeTAOptions();
     districtButton.setAttribute("aria-pressed", "true");
+    syncTASelect();
     map.fitBounds(districtLayer.getBounds().pad(0.04));
     render(activeData());
   }
 
-  taSearch.addEventListener("input", () => {
-    const value = taSearch.value.trim();
-    clearTASearch.hidden = value.length === 0;
-    if (!value) {
-      selectDistrict();
-    } else {
-      const exactName = taNames.find((name) => name.toLocaleLowerCase() === value.toLocaleLowerCase());
-      if (exactName) {
-        selectTA(exactName);
-      } else {
-        const matches = showTAOptions(value);
-        areaStatus.textContent = matches
-          ? `${matches} Traditional Authorities match. Select one to filter the map.`
-          : "No Traditional Authorities match that search.";
-      }
-    }
-  });
-  taSearch.addEventListener("focus", () => {
-    showTAOptions(taSearch.value.trim());
-  });
-  taSearch.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      closeTAOptions();
-      return;
-    }
-    if (event.key === "ArrowDown" && !taOptions.hidden) {
-      event.preventDefault();
-      taOptions.querySelector(".ta-option")?.focus();
-    }
-  });
-  clearTASearch.addEventListener("click", () => {
-    selectDistrict();
-    taSearch.focus();
-  });
-  taOptionsToggle.addEventListener("click", () => {
-    if (taOptions.hidden) showTAOptions(taSearch.value.trim());
-    else closeTAOptions();
+  taSelect.addEventListener("change", () => {
+    const value = taSelect.value || null;
+    if (value === state.name) return; // programmatic sync, already applied
+    if (value) selectTA(value);
+    else selectDistrict();
   });
   districtButton.addEventListener("click", selectDistrict);
   const routeSelectionChanged = () => {
@@ -1890,9 +2378,6 @@ async function init() {
   routeFacilitySelect.addEventListener("change", routeSelectionChanged);
   findRouteButton.addEventListener("click", findRoute);
   clearRouteButton.addEventListener("click", clearRoute);
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest(".area-control")) closeTAOptions();
-  });
   placeScenarioButton.addEventListener("click", () => {
     state.placingScenario = !state.placingScenario;
     placeScenarioButton.textContent = state.placingScenario
@@ -1947,11 +2432,15 @@ async function init() {
     }
   });
   map.getContainer().addEventListener("click", async (event) => {
-    if (event.target instanceof Element && event.target.closest(".map-scenario-results, .map-route-results")) return;
+    if (event.target instanceof Element && event.target.closest(".map-scenario-results, .map-route-results, .leaflet-popup, .leaflet-control")) return;
     if (!state.placingScenario || state.siteScreeningPending) return;
     L.DomEvent.stopPropagation(event);
     L.DomEvent.preventDefault(event);
-    const latlng = map.mouseEventToLatLng(event);
+    await addCandidateAt(map.mouseEventToLatLng(event));
+  }, true);
+
+  // Screen and add a candidate site (map click in placement mode, or a popup action).
+  async function addCandidateAt(latlng) {
     const point = turf.point([latlng.lng, latlng.lat]);
     const inScope = state.areas.length
       ? state.areas.some((area) => turf.booleanPointInPolygon(point, area))
@@ -2004,6 +2493,7 @@ async function init() {
       loading: true,
     };
     state.scenarios.push(candidate);
+    showScenarioLayer();
     state.placingScenario = false;
     state.scenarioResultsCollapsed = false;
     placeScenarioButton.textContent = "Add another site";
@@ -2025,7 +2515,125 @@ async function init() {
       });
     }
     estimateScenarioCandidate(candidate);
-  }, true);
+  }
+
+  // Re-show candidate sites (if the layer was switched off) when a site is added.
+  function showScenarioLayer() {
+    const toggle = document.getElementById("lyr-scenario");
+    state.scenarioLayerHidden = false;
+    if (toggle) toggle.checked = true;
+    if (!map.hasLayer(layers.scenario)) map.addLayer(layers.scenario);
+  }
+
+  function pointInScope(point) {
+    return state.areas.length
+      ? state.areas.some((area) => turf.booleanPointInPolygon(point, area))
+      : boundary.features.some((feature) => turf.booleanPointInPolygon(point, feature));
+  }
+
+  // Nudge a suggested point off any detected building (up to 500 m away).
+  async function findOpenSiteNear(coordinates) {
+    const offsets = [[0, 0]];
+    [0.15, 0.3, 0.5].forEach((km) => {
+      for (let bearing = 0; bearing < 360; bearing += 45) offsets.push([km, bearing]);
+    });
+    for (const [km, bearing] of offsets) {
+      const point = km ? turf.destination(coordinates, km, bearing, { units: "kilometers" }) : turf.point(coordinates);
+      if (!pointInScope(point)) continue;
+      const siteScreening = await screenCandidateSite(point.geometry.coordinates);
+      if (!siteScreening.occupied) return { point, siteScreening };
+    }
+    return null;
+  }
+
+  async function addSuggestedSites({ type, radius } = {}) {
+    if (type && scenarioTypeInput.value !== type) {
+      scenarioTypeInput.value = type;
+      scenarioTypeInput.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    if (radius) scenarioRadiusInput.value = String(radius);
+    const siteType = scenarioTypeInput.value;
+    const radiusKm = Number(scenarioRadiusInput.value);
+    if (!Number.isFinite(radiusKm) || radiusKm < 1 || radiusKm > 50) {
+      showScenarioNotice("Invalid radius", "Enter a scenario radius between 1 and 50 km.", "error", true);
+      return;
+    }
+    const label = siteType === "school" ? "school" : "health centre";
+    const picks = computeSuggestedSites(activeData(), siteType, radiusKm, 3);
+    if (!picks.length) {
+      const message = `Every populated settlement in ${state.name || "Dedza"} is already within ${radiusKm} km of a ${siteType === "school" ? "school" : "baseline health facility"} or a candidate site.`;
+      scenarioStatus.textContent = message;
+      showScenarioNotice("No coverage gap at this radius", message, "success", true);
+      return;
+    }
+    suggestSitesButton.disabled = true;
+    suggestSitesButton.classList.add("is-loading");
+    state.placingScenario = false;
+    placeScenarioButton.textContent = state.scenarios.length ? "Add another site" : "Add site on map";
+    showScenarioNotice("Finding best sites", `Searching ${picks.length} ${label} locations that reach the most unserved people…`, "warning", false);
+    const added = [];
+    try {
+      for (const pick of picks) {
+        const open = await findOpenSiteNear(pick.coordinates);
+        if (!open) continue;
+        const candidate = {
+          id: state.nextScenarioId++,
+          point: open.point,
+          type: siteType,
+          radius: radiusKm,
+          siteScreening: open.siteScreening,
+          loading: true,
+          suggestion: {
+            name: pick.site.properties.name,
+            people: pick.people,
+            settlementCount: pick.settlementCount,
+          },
+        };
+        state.scenarios.push(candidate);
+        added.push(candidate);
+      }
+    } catch (error) {
+      showScenarioNotice("Screening unavailable", `Could not screen suggested sites: ${error.message}`, "error", true);
+    } finally {
+      suggestSitesButton.disabled = false;
+      suggestSitesButton.classList.remove("is-loading");
+    }
+    if (!added.length) {
+      showScenarioNotice("No open site found", "Every suggested location overlaps detected buildings. Place a site manually.", "error", true);
+      return;
+    }
+    showScenarioLayer();
+    state.scenarioResultsCollapsed = false;
+    placeScenarioButton.textContent = "Add another site";
+    const totalPeople = added.reduce((sum, candidate) => sum + candidate.suggestion.people, 0);
+    const message = `${added.length} suggested ${label} site${added.length === 1 ? "" : "s"} added; together they could bring about ${Math.round(totalPeople).toLocaleString()} people in mapped settlements within ${radiusKm} km. Estimating full reach…`;
+    scenarioStatus.textContent = message;
+    showScenarioNotice("Suggested sites added", message, "success", true);
+    render(activeData());
+    const bounds = L.latLngBounds(added.map((candidate) => {
+      const [lon, lat] = candidate.point.geometry.coordinates;
+      return [lat, lon];
+    }));
+    map.fitBounds(bounds.pad(0.6), { maxZoom: 12 });
+    added.forEach((candidate) => estimateScenarioCandidate(candidate));
+  }
+  const suggestSitesButton = document.getElementById("suggest-sites");
+  suggestSitesButton.addEventListener("click", () => addSuggestedSites());
+  document.getElementById("briefing-actions").addEventListener("click", (event) => {
+    const button = event.target instanceof Element && event.target.closest("[data-action]");
+    if (!button) return;
+    const { action, value } = button.dataset;
+    if (action === "select-ta") selectTA(value);
+    if (action === "suggest") {
+      addSuggestedSites({ type: value, radius: Number(button.dataset.radius) });
+      map.getContainer().scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+    if (action === "zoom") {
+      const [lon, lat] = value.split(",").map(Number);
+      map.setView([lat, lon], 13);
+      map.getContainer().scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+  });
   document.getElementById("export-brief").addEventListener("click", exportPlanningBrief);
   let gapAnalysisTimer = null;
   const scheduleGapAnalysis = () => {
@@ -2036,6 +2644,7 @@ async function init() {
     }
     gapServedValue.textContent = `${servedKm} km`;
     gapUnderservedValue.textContent = `${gapUnderservedInput.value} km`;
+    updateRangeFills();
     gapAnalysisResults.textContent = "Recalculating coverage in SQLite...";
     const requestId = ++state.gapAnalysisRequestId;
     clearTimeout(gapAnalysisTimer);
@@ -2087,6 +2696,7 @@ async function init() {
     Object.entries(raw).forEach(([key, value]) => {
       weightOutputs[key].textContent = total ? `${Math.round(value / total * 100)}%` : "0%";
     });
+    updateRangeFills();
     return { raw, total };
   }
 
@@ -2153,8 +2763,10 @@ async function init() {
     render(activeData());
   });
 
-  document.getElementById("sources").textContent = `${summary.meta.sources}; ArcGIS Malawi Health 2026 FeatureServer (separate reference layer); WorldPop 2025 R2025A v1 (CC BY 4.0)`;
-  renderTAComparison(buildTAComparison());
+  document.getElementById("sources").textContent = `Sources: ${summary.meta.sources}`;
+  const taRows = buildTAComparison();
+  renderTAComparison(taRows);
+  populateTASelect(taRows);
   selectDistrict();
   if (!baseTilesFailed) mapStatus.hidden = true;
 
@@ -2172,15 +2784,136 @@ async function init() {
     });
   });
 
+  // ---- Collapsible sidebar sections (state remembered per browser) ----
+  const SECTION_STATE_KEY = "dd-sdss-collapsed-sections";
+  const DEFAULT_COLLAPSED = ["School coverage profile", "Population by health access", "Legend"];
+  let collapsedSections = new Set(DEFAULT_COLLAPSED);
+  try {
+    const saved = JSON.parse(localStorage.getItem(SECTION_STATE_KEY) || "null");
+    if (Array.isArray(saved)) collapsedSections = new Set(saved);
+  } catch { /* storage unavailable: use defaults */ }
+  const saveSectionState = () => {
+    try { localStorage.setItem(SECTION_STATE_KEY, JSON.stringify([...collapsedSections])); } catch { /* ignore */ }
+  };
+  function setSectionCollapsed(section, collapsed, remember = true) {
+    const toggle = section.querySelector(":scope > h2 > .section-toggle");
+    const body = section.querySelector(":scope > .section-body");
+    if (!toggle || !body) return;
+    section.classList.toggle("is-collapsed", collapsed);
+    body.hidden = collapsed;
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    if (remember) {
+      if (collapsed) collapsedSections.add(toggle.dataset.title);
+      else collapsedSections.delete(toggle.dataset.title);
+      saveSectionState();
+    }
+  }
+  document.querySelectorAll(".panel > section").forEach((section, index) => {
+    const heading = section.querySelector(":scope > h2");
+    if (!heading) return;
+    const title = heading.textContent.trim();
+    const body = document.createElement("div");
+    body.className = "section-body";
+    body.id = `section-body-${index}`;
+    [...section.childNodes].filter((node) => node !== heading).forEach((node) => body.appendChild(node));
+    section.appendChild(body);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "section-toggle";
+    toggle.dataset.title = title;
+    toggle.setAttribute("aria-controls", body.id);
+    toggle.innerHTML = `<span>${escapeHtml(title)}</span><span class="section-chevron" aria-hidden="true"></span>`;
+    heading.replaceChildren(toggle);
+    section.classList.add("collapsible");
+    toggle.addEventListener("click", () =>
+      setSectionCollapsed(section, !section.classList.contains("is-collapsed")));
+    setSectionCollapsed(section, collapsedSections.has(title), false);
+  });
+
+  // Open the sidebar section holding `element` and bring it into view.
+  function revealControl(element) {
+    if (!element) return;
+    const section = element.closest(".panel > section");
+    if (section?.classList.contains("is-collapsed")) setSectionCollapsed(section, false);
+    const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    element.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
+  }
+
+  // Keep an opened popup clear of the candidate-results panel on the right.
+  // Runs after Leaflet's own auto-pan (about 0.25 s) so the two pans don't fight.
+  map.on("popupopen", (event) => {
+    if (scenarioResults.hidden) return;
+    setTimeout(() => {
+      if (!event.popup.isOpen()) return;
+      const popupBox = event.popup.getElement()?.getBoundingClientRect();
+      const panelBox = scenarioResults.getBoundingClientRect();
+      const mapBox = map.getContainer().getBoundingClientRect();
+      if (!popupBox) return;
+      const overlap = popupBox.right - (panelBox.left - 12);
+      const dx = overlap > 0 && popupBox.top < panelBox.bottom ? overlap : 0;
+      const dy = Math.min(0, popupBox.top - (mapBox.top + 12));
+      if (dx || dy) map.panBy([dx, dy]);
+    }, 320);
+  });
+
+  // ---- Popup action buttons (delegated; capture phase so Leaflet cannot swallow it) ----
+  map.getContainer().addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest(".popup-action") : null;
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const data = button.dataset;
+    if (data.action === "zoom") {
+      map.closePopup();
+      map.flyTo([Number(data.lat), Number(data.lng)], Math.max(map.getZoom(), Number(data.zoom) || 12));
+    } else if (data.action === "route-from" || data.action === "route-to") {
+      if (routeLoading || data.index === undefined || data.index === "") return;
+      const isFrom = data.action === "route-from";
+      const select = isFrom ? routeSettlementSelect : routeFacilitySelect;
+      const other = isFrom ? routeFacilitySelect : routeSettlementSelect;
+      select.value = data.index;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      map.closePopup();
+      const name = select.options[select.selectedIndex]?.textContent.trim() || "";
+      if (other.value) {
+        revealControl(findRouteButton);
+        showScenarioNotice("Calculating route", `${isFrom ? "From" : "To"} ${name}. Comparing route options...`, "success", true);
+        findRoute();
+      } else {
+        revealControl(document.getElementById(`${other.id}-button`));
+        showScenarioNotice(
+          isFrom ? "Start point set" : "Destination set",
+          `${name}. Now choose the ${isFrom ? "health facility" : "starting settlement"} in the sidebar, or click one on the map and use Route ${isFrom ? "to" : "from"} here.`,
+          "success",
+          true
+        );
+      }
+    } else if (data.action === "add-site") {
+      map.closePopup();
+      if (state.siteScreeningPending) return;
+      state.placingScenario = true;
+      addCandidateAt(L.latLng(Number(data.lat), Number(data.lng)));
+    }
+  }, true);
+
   const bind = (id, group) => {
     document.getElementById(id).addEventListener("change", (ev) => {
       if (ev.target.checked) map.addLayer(group);
       else map.removeLayer(group);
     });
   };
+  // Candidate sites: the checkbox hides both the map markers and the results panel.
+  const scenarioToggle = document.getElementById("lyr-scenario");
+  scenarioToggle.addEventListener("change", () => {
+    state.scenarioLayerHidden = !scenarioToggle.checked;
+    if (scenarioToggle.checked) map.addLayer(layers.scenario);
+    else map.removeLayer(layers.scenario);
+    renderScenario(activeData());
+  });
+  document.getElementById("close-scenario-results").addEventListener("click", () => clearScenarioButton.click());
   bind("lyr-cells", layers.cells);
   bind("lyr-facilities", layers.facilities);
-  bind("lyr-health2026", layers.health2026);
+  bind("lyr-registry", layers.registry);
   bind("lyr-schools", layers.schools);
   bind("lyr-settlements", layers.settlements);
   bind("lyr-buffers", layers.buffers);

@@ -355,6 +355,13 @@ def test_road_time_search_honors_direction_and_time_limit():
     assert shortest_road_time_to_target(graph, start, target, 30) is None
     assert shortest_road_time_to_target(graph, target, start, 60) is None
 
+    # The multi-source search used for scenarios gives the same directed times.
+    times = app_module.road_times_to_sources(graph, {target}, 60)
+    assert times[start] == pytest.approx(35)
+    assert times[middle] == pytest.approx(15)
+    assert app_module.road_times_to_sources(graph, {target}, 30).get(start) is None
+    assert app_module.road_times_to_sources(graph, {start}, 60).get(target) is None
+
 
 def test_scenario_road_access_compares_candidate_with_existing_service(monkeypatch):
     start = (34.0, -14.0)

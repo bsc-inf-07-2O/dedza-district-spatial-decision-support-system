@@ -16,7 +16,7 @@ from rasterio.mask import mask
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "data" / "processed" / "dedza.sqlite"
 ADM2_PATH = ROOT / "data" / "raw" / "MWI_ADM2_simplified.geojson"
-ADM3_PATH = ROOT / "data" / "raw" / "MWI_ADM3_simplified.geojson"
+ADM3_PATH = ROOT / "data" / "raw" / "MWI_ADM3_humanitarian.geojson"  # same file as app.py
 DEFAULT_RASTER = ROOT / "data" / "raw" / "mwi_pop_2025_CN_100m_R2025A_v1.tif"
 SOURCE_NAME = "WorldPop 2025 R2025A v1"
 

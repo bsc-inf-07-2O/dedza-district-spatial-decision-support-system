@@ -23,9 +23,21 @@ CROSS_BORDER_KM = 20.0
 
 # Border slivers smaller than this are scored but not ranked as recommendations.
 MIN_RANKED_CELL_KM2 = 1.0
+SOURCES = (
+    "Ministry of Health Malawi health facilities (baseline); "
+    "Malawi Health Facility Registry (MHFR, Ministry of Health); "
+    "Malawi schools point dataset; "
+    "GRID3 Malawi Settlement Extents v3.0 (CIESIN, CC BY-SA 4.0); "
+    "WorldPop 2025 constrained population R2025A v1 (CC BY 4.0); "
+    "NSO Malawi Traditional Authority boundaries via geoBoundaries/HDX (CC BY 3.0 IGO); "
+    "geoBoundaries MWI ADM2 district boundary; "
+    "HOT OpenStreetMap roads, waterways and place names (ODbL); "
+    "Microsoft Global ML Building Footprints (CDLA Permissive 2.0); "
+    "ESA WorldCover 2021 v200 (CC BY 4.0); Mapzen Terrain Tiles (slope)"
+)
 
 # Tables created by other import scripts; a rebuild carries them over.
-IMPORTED_TABLES = ("schools", "settlements", "health_facilities_2026", "population_summary")
+IMPORTED_TABLES = ("schools", "settlements", "osm_places", "mhfr_facilities", "population_summary")
 
 MAJOR_ROADS = (
     "motorway",
@@ -600,7 +612,7 @@ def main() -> None:
         "health_access_standard_km": "5",
         "crs": "EPSG:4326",
         "analysis_crs": "EPSG:32736",
-        "sources": "MOH Malawi health facilities shapefile; HOT OSM roads & waterways; geoBoundaries MWI ADM2",
+        "sources": SOURCES,
         "n_facilities_for_distance": str(n_access),
         "cross_border_km": f"{cross_border_m / 1000:g}",
         "min_ranked_cell_km2": f"{MIN_RANKED_CELL_KM2:g}",

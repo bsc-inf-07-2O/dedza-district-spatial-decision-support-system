@@ -34,7 +34,9 @@ ENVIRONMENTAL_RASTER_PATHS = {
 }
 STATIC = ROOT / "static"
 ADM2_PATH = RAW / "MWI_ADM2_simplified.geojson"
-ADM3_PATH = RAW / "MWI_ADM3_simplified.geojson"
+# Traditional Authority boundaries: geoBoundaries gbHumanitarian (NSO Malawi / HDX, CC BY 3.0 IGO).
+# The earlier gbOpen ADM3 file carried other districts' TA names on Dedza's polygons.
+ADM3_PATH = RAW / "MWI_ADM3_humanitarian.geojson"
 WORLDPOP_PATH = RAW / "mwi_pop_2025_CN_100m_R2025A_v1.tif"
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
@@ -326,34 +328,50 @@ def shortest_road_time_to_target(
     return None
 
 
-def shortest_road_time_to_any_target(
-    graph: dict[tuple[float, float], list[tuple[tuple[float, float], float, float]]],
-    start: tuple[float, float],
-    targets: set[tuple[float, float]],
-    max_time_min: float,
-) -> float | None:
-    if start not in graph or not targets:
-        return None
-    if start in targets:
-        return 0.0
+_REVERSED_GRAPH: tuple[int, dict] | None = None
 
-    costs = {start: 0.0}
-    queue = [(0.0, start)]
+
+def reverse_road_graph(
+    graph: dict[tuple[float, float], list[tuple[tuple[float, float], float, float]]],
+) -> dict[tuple[float, float], list[tuple[tuple[float, float], float, float]]]:
+    """Edges flipped (v -> u for every u -> v), cached for the current graph object."""
+    global _REVERSED_GRAPH
+    if _REVERSED_GRAPH is not None and _REVERSED_GRAPH[0] == id(graph):
+        return _REVERSED_GRAPH[1]
+    reversed_graph: dict = {node: [] for node in graph}
+    for node, edges in graph.items():
+        for neighbor, distance_km, time_min in edges:
+            reversed_graph.setdefault(neighbor, []).append((node, distance_km, time_min))
+    _REVERSED_GRAPH = (id(graph), reversed_graph)
+    return reversed_graph
+
+
+def road_times_to_sources(
+    graph: dict[tuple[float, float], list[tuple[tuple[float, float], float, float]]],
+    sources: set[tuple[float, float]],
+    max_time_min: float,
+) -> dict[tuple[float, float], float]:
+    """Travel time from every node to its nearest source node, within max_time_min.
+
+    One multi-source Dijkstra on the reversed graph gives, for each node, the
+    shortest time *to* the sources along the original (directed) roads. This
+    replaces one search per settlement and returns exact shortest times.
+    """
+    reversed_graph = reverse_road_graph(graph)
+    times = {source: 0.0 for source in sources if source in graph}
+    queue = [(0.0, source) for source in times]
+    heapq.heapify(queue)
     while queue:
-        cost_so_far, current = heapq.heappop(queue)
-        if cost_so_far > max_time_min:
-            break
-        if cost_so_far > costs.get(current, float("inf")):
+        time_so_far, current = heapq.heappop(queue)
+        if time_so_far > times.get(current, float("inf")):
             continue
-        if current in targets:
-            return cost_so_far
-        for neighbor, _, time_min in graph[current]:
-            candidate = cost_so_far + time_min
-            if candidate > max_time_min or candidate >= costs.get(neighbor, float("inf")):
+        for neighbor, _, time_min in reversed_graph.get(current, ()):
+            candidate = time_so_far + time_min
+            if candidate > max_time_min or candidate >= times.get(neighbor, float("inf")):
                 continue
-            costs[neighbor] = candidate
+            times[neighbor] = candidate
             heapq.heappush(queue, (candidate, neighbor))
-    return None
+    return times
 
 
 def road_path_cost(
@@ -659,12 +677,17 @@ def load_payloads() -> dict:
     schools = [dict(r) for r in con.execute(
         "SELECT name, school_id, status, district, lon, lat FROM schools ORDER BY name"
     )] if "schools" in tables else []
+    settlement_columns = {
+        row[1] for row in con.execute("PRAGMA table_info(settlements)")
+    } if "settlements" in tables else set()
+    extra_columns = ", building_count, source" if "building_count" in settlement_columns else ""
     settlements = [dict(r) for r in con.execute(
-        "SELECT name, place, population, adm3_name, lon, lat FROM settlements ORDER BY name"
+        f"SELECT name, place, population, adm3_name, lon, lat{extra_columns} FROM settlements ORDER BY name"
     )] if "settlements" in tables else []
-    health2026 = [dict(r) for r in con.execute(
-        "SELECT source_id, name, ownership, zone, dho, lon, lat FROM health_facilities_2026 ORDER BY name"
-    )] if "health_facilities_2026" in tables else []
+    registry = [dict(r) for r in con.execute(
+        """SELECT source_id, facility_code, name, facility_type, ownership, lon, lat
+           FROM mhfr_facilities ORDER BY name"""
+    )] if "mhfr_facilities" in tables else []
     population_summary = [dict(r) for r in con.execute(
         """SELECT area_name, coverage, population_est, source, year
            FROM population_summary ORDER BY area_name, coverage"""
@@ -762,7 +785,7 @@ def load_payloads() -> dict:
         "facilities": facilities,
         "schools": schools,
         "settlements": settlements,
-        "health2026": health2026,
+        "registry": registry,
         "population_summary": population_summary,
         "cells": cells,
         "roads": roads,
@@ -830,19 +853,12 @@ def scenario_baseline_road_times(
         for settlement in payloads["settlements"]
     ]
     settlement_nodes = [nearest_road_node(point, projected) for point in settlement_points]
+    # One search from all existing services instead of one per settlement.
+    times_to_service = road_times_to_sources(graph, service_nodes, MAX_SCENARIO_TRAVEL_TIME_MIN)
     baselines = {}
     for settlement, point, node in zip(payloads["settlements"], settlement_points, settlement_nodes):
         snap_distance = haversine_km(point, node)
-        baseline_time = (
-            shortest_road_time_to_any_target(
-                graph,
-                node,
-                service_nodes,
-                MAX_SCENARIO_TRAVEL_TIME_MIN,
-            )
-            if snap_distance <= MAX_ROAD_SNAP_KM
-            else None
-        )
+        baseline_time = times_to_service.get(node) if snap_distance <= MAX_ROAD_SNAP_KM else None
         key = (str(settlement["name"]), point[0], point[1])
         baselines[key] = (node, snap_distance, baseline_time)
     return baselines
@@ -881,20 +897,13 @@ def estimate_scenario_road_access(
 
     payloads = load_payloads()
     baseline_times = scenario_baseline_road_times(facility_type)
+    # One search from the candidate gives every settlement's time to it.
+    times_to_candidate = road_times_to_sources(graph, {candidate_node}, MAX_SCENARIO_TRAVEL_TIME_MIN)
     for settlement in payloads["settlements"]:
         point = (float(settlement["lon"]), float(settlement["lat"]))
         key = (str(settlement["name"]), point[0], point[1])
         settlement_node, snap_distance, existing_time = baseline_times[key]
-        candidate_time = (
-            shortest_road_time_to_target(
-                graph,
-                settlement_node,
-                candidate_node,
-                MAX_SCENARIO_TRAVEL_TIME_MIN,
-            )
-            if snap_distance <= MAX_ROAD_SNAP_KM
-            else None
-        )
+        candidate_time = times_to_candidate.get(settlement_node) if snap_distance <= MAX_ROAD_SNAP_KM else None
         result["settlements"].append({
             "name": settlement["name"],
             "adm3_name": settlement.get("adm3_name"),
@@ -1052,7 +1061,7 @@ def summary():
             "type_counts": data["type_counts"],
             "coverage": data["coverage"],
             "recommendations": data["recommendations"],
-            "n_health_facilities_2026": len(data["health2026"]),
+            "n_registry_facilities": len(data["registry"]),
         }
     )
 
@@ -1460,8 +1469,9 @@ def route():
     return jsonify(result)
 
 
-@app.get("/api/health-facilities-2026")
-def health_facilities_2026():
+@app.get("/api/registry-facilities")
+def registry_facilities():
+    """Operational Dedza facilities from the Malawi Health Facility Registry (MHFR)."""
     return jsonify(
         {
             "type": "FeatureCollection",
@@ -1470,9 +1480,9 @@ def health_facilities_2026():
                     "type": "Feature",
                     "properties": {
                         "name": facility["name"],
+                        "facility_type": facility["facility_type"],
                         "ownership": facility["ownership"],
-                        "zone": facility["zone"],
-                        "dho": facility["dho"],
+                        "facility_code": facility["facility_code"],
                         "source_id": facility["source_id"],
                     },
                     "geometry": {
@@ -1480,7 +1490,7 @@ def health_facilities_2026():
                         "coordinates": [facility["lon"], facility["lat"]],
                     },
                 }
-                for facility in load_payloads()["health2026"]
+                for facility in load_payloads()["registry"]
             ],
         }
     )
@@ -1568,6 +1578,8 @@ def settlements():
                         "place": settlement["place"] or "",
                         "population": settlement["population"],
                         "adm3_name": settlement["adm3_name"] or "",
+                        "building_count": settlement.get("building_count"),
+                        "source": settlement.get("source") or "OpenStreetMap",
                     },
                     "geometry": {
                         "type": "Point",
@@ -1600,5 +1612,19 @@ def recommendations():
     return jsonify(load_payloads()["recommendations"])
 
 
+def warm_caches() -> None:
+    """Prepare the road network and scenario baselines so the first site comparison is fast."""
+    try:
+        load_road_network()
+        for facility_type in ("health", "school"):
+            scenario_baseline_road_times(facility_type)
+        print("Road network and scenario baselines ready.", flush=True)
+    except Exception as error:  # the app still works; the first comparison is just slower
+        print(f"Cache warm-up skipped: {error}", flush=True)
+
+
 if __name__ == "__main__":
+    import threading
+
+    threading.Thread(target=warm_caches, daemon=True).start()
     app.run(host="127.0.0.1", port=5000, debug=False)
