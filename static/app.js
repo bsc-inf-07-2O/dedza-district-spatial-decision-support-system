@@ -84,6 +84,12 @@ const layers = {
     opacity: 0.62,
     attribution: "Mapzen Terrain Tiles; SRTM/GMTED2010 data courtesy of USGS",
   }),
+  flood: L.tileLayer("/api/environmental-tiles/flood/{z}/{x}/{y}.png", {
+    maxNativeZoom: 14,
+    maxZoom: 18,
+    opacity: 0.75,
+    attribution: "JRC Copernicus EMS GloFAS flood hazard map v2.1 (ODbL)",
+  }),
   landCover: L.tileLayer("/api/environmental-tiles/land_cover/{z}/{x}/{y}.png", {
     maxNativeZoom: 15,
     maxZoom: 18,
@@ -95,19 +101,82 @@ const layers = {
 const mapLegend = L.control({ position: "bottomright" });
 mapLegend.onAdd = () => {
   const div = L.DomUtil.create("div", "map-legend");
+  // Each entry carries data-layer; updateMapLegend() shows only entries whose
+  // layer is on the map, and hides a section when none of its entries are.
   div.innerHTML = `
-    <strong>Health access</strong>
-    <ul class="legend">
-      <li><span class="swatch served"></span> <span id="map-legend-served">Served (≤ 5 km)</span></li>
-      <li><span class="swatch underserved"></span> <span id="map-legend-underserved">Underserved (5–8 km)</span></li>
-      <li><span class="swatch unserved"></span> <span id="map-legend-unserved">Unserved (&gt; 8 km)</span></li>
-      <li><span class="swatch facility"></span> Health facility</li>
-      <li><span class="priority-rank legend-rank">1</span> Priority cell (rank)</li>
-    </ul>`;
+    <strong class="map-legend-title">Map legend</strong>
+    <div class="map-legend-section" data-section="health">
+      <span class="map-legend-heading">Health access</span>
+      <ul class="legend">
+        <li data-layer="cells"><span class="swatch served"></span> <span id="map-legend-served">Served (≤ 5 km)</span></li>
+        <li data-layer="cells"><span class="swatch underserved"></span> <span id="map-legend-underserved">Underserved (5–8 km)</span></li>
+        <li data-layer="cells"><span class="swatch unserved"></span> <span id="map-legend-unserved">Unserved (&gt; 8 km)</span></li>
+        <li data-layer="facilities"><span class="swatch facility"></span> Health facility</li>
+        <li data-layer="priority"><span class="priority-rank legend-rank">1</span> Priority cell (rank)</li>
+      </ul>
+    </div>
+    <div class="map-legend-section" data-section="other">
+      <span class="map-legend-heading">Other layers</span>
+      <ul class="legend">
+        <li data-layer="registry"><span class="swatch facility-registry"></span> MHFR registry facility</li>
+        <li data-layer="buffers"><span class="swatch buffer-ring"></span> 5 km facility coverage ring</li>
+        <li data-layer="schools"><span class="swatch school"></span> School</li>
+        <li data-layer="settlements"><span class="swatch settlement-in"></span> Settlement within school radius</li>
+        <li data-layer="settlements"><span class="swatch settlement-out"></span> Settlement beyond school radius</li>
+        <li data-layer="roads"><span class="swatch road"></span> Road</li>
+        <li data-layer="water"><span class="swatch water"></span> Mapped waterway</li>
+        <li data-layer="scenario"><span class="swatch scenario-site"></span> Candidate site and radius</li>
+        <li data-layer="buildings"><span class="swatch building"></span> Detected building footprint</li>
+        <li data-layer="slope"><span class="swatch environmental-slope"></span> Slope: low to high</li>
+        <li data-layer="landCover"><span class="swatch environmental-landcover"></span> WorldCover land cover</li>
+        <li data-layer="flood"><span class="swatch flood-zone"></span> 1-in-100-year flood zone (deeper = darker)</li>
+      </ul>
+    </div>`;
   L.DomEvent.disableClickPropagation(div);
+  // Let the mouse wheel scroll the legend rather than zoom the map.
+  L.DomEvent.disableScrollPropagation(div);
   return div;
 };
 mapLegend.addTo(map);
+
+function layerIsShown(key) {
+  const layer = layers[key];
+  if (!layer || !map.hasLayer(layer)) return false;
+  // Candidate sites are "on" by default but empty until a site is added.
+  if (key === "scenario") return layer.getLayers().length > 0;
+  return true;
+}
+
+function updateMapLegend() {
+  const container = mapLegend.getContainer();
+  if (!container) return;
+  let anyVisible = false;
+  container.querySelectorAll(".map-legend-section").forEach((section) => {
+    let sectionVisible = false;
+    section.querySelectorAll("li[data-layer]").forEach((item) => {
+      const shown = layerIsShown(item.dataset.layer);
+      item.hidden = !shown;
+      sectionVisible = sectionVisible || shown;
+    });
+    section.hidden = !sectionVisible;
+    anyVisible = anyVisible || sectionVisible;
+  });
+  container.hidden = !anyVisible;
+}
+
+// layeradd/layerremove fire for every marker as well as for whole groups, so
+// batch the legend refresh into one update per frame.
+let legendUpdateQueued = false;
+function queueMapLegendUpdate() {
+  if (legendUpdateQueued) return;
+  legendUpdateQueued = true;
+  requestAnimationFrame(() => {
+    legendUpdateQueued = false;
+    updateMapLegend();
+  });
+}
+map.on("layeradd layerremove", queueMapLegendUpdate);
+updateMapLegend();
 
 const selectedBoundary = L.geoJSON(null, {
   style: { color: "#f4a261", weight: 3, fillColor: "#f4a261", fillOpacity: 0.08 },
@@ -153,23 +222,32 @@ function escapeHtml(value) {
     "'": "&#39;",
   })[char]);
 }
-function travelAdjustedScore(properties) {
-  if (Number.isFinite(Number(properties.road_access_score))) {
-    return Math.max(0, Math.min(100, Number(properties.road_access_score)));
-  }
-  const distKm = Number(properties.dist_km) || 0;
-  const roadKm = Number(properties.road_km) || 0;
-  const waterKm = Number(properties.water_km) || 0;
-
-  const roadDistanceProxyKm = distKm + Math.max(0, 5 - roadKm) * 1.8 + Math.max(0, 2 - waterKm) * 1.2;
-  return Math.max(0, Math.min(100, Math.round(100 - roadDistanceProxyKm * 6)));
+// Road travel time (minutes) from a cell's population centre to the nearest
+// facility, calculated at build time on the mapped road network.
+function formatMinutes(minutes) {
+  if (minutes == null || !Number.isFinite(Number(minutes))) return "no road route";
+  const total = Math.round(Number(minutes));
+  return total >= 60 ? `${Math.floor(total / 60)} h ${total % 60} min` : `${total} min`;
 }
 
-function travelAdjustedLabel(score) {
-  if (score >= 75) return "strong";
-  if (score >= 50) return "moderate";
+function travelTimeTone(minutes) {
+  if (minutes == null) return "weak";
+  if (minutes <= 30) return "strong";
+  if (minutes <= 60) return "moderate";
   return "weak";
 }
+
+function formatShare(share) {
+  return `${Math.round(Number(share || 0) * 100)}%`;
+}
+
+function growthText(properties) {
+  const base = Number(properties.population) || 0;
+  const growth = Number(properties.growth) || 0;
+  const rate = base > 0 ? ` (+${(growth / base * 100).toFixed(0)}%)` : "";
+  return `${Math.round(Number(properties.population_2030) || 0).toLocaleString()}${rate}`;
+}
+
 function kpi(label, value) {
   return `<div class="kpi"><b>${value}</b><span>${label}</span></div>`;
 }
@@ -301,6 +379,22 @@ async function init() {
     baselineTopCells: new Set(priorityScenario.top_cell_ids.map(Number)),
     priorityRequestId: 0,
   };
+  // Baseline weights come from the database (meta table) via the API.
+  const BASELINE_WEIGHTS = priorityScenario.baseline_weights;
+  const PRIORITY_CRITERIA = {
+    population: "population 2030",
+    growth: "growth",
+    distance: "distance to care",
+    road: "road access",
+    flood: "flood safety",
+  };
+  const baselineWeightsLabel = Object.keys(PRIORITY_CRITERIA)
+    .map((key) => Math.round(BASELINE_WEIGHTS[key]))
+    .join(" / ");
+  const baselineWeightsText = Object.entries(PRIORITY_CRITERIA)
+    .map(([key, label]) => `${label} ${Math.round(BASELINE_WEIGHTS[key])}%`)
+    .join(", ");
+  const roadAccessKm = Number(summary.meta.road_access_km) || 2;
   // Score under the current priority weights (falls back to the stored baseline).
   const cellScore = (properties) =>
     state.priorityScores.get(Number(properties.cell_id)) ?? properties.priority_score;
@@ -338,6 +432,7 @@ async function init() {
   const buildingToggle = document.getElementById("lyr-buildings");
   const slopeToggle = document.getElementById("lyr-slope");
   const landCoverToggle = document.getElementById("lyr-land-cover");
+  const floodToggle = document.getElementById("lyr-flood");
   const buildingLayerStatus = document.getElementById("building-layer-status");
   const environmentLayerStatus = document.getElementById("environment-layer-status");
   const gapServedInput = document.getElementById("gap-served-km");
@@ -364,9 +459,12 @@ async function init() {
   slopeToggle.title = siteLayers.terrain.message;
   landCoverToggle.disabled = !siteLayers.land_cover.available;
   landCoverToggle.title = siteLayers.land_cover.message;
+  floodToggle.disabled = !siteLayers.flood.available;
+  floodToggle.title = siteLayers.flood.message;
   environmentLayerStatus.textContent = [
     `Slope: ${siteLayers.terrain.message}`,
     `Land cover: ${siteLayers.land_cover.message}`,
+    `Flood: ${siteLayers.flood.message}`,
   ].join(" ");
   let buildingRequestId = 0;
   let buildingLoadTimer = null;
@@ -998,23 +1096,41 @@ async function init() {
       ? `WorldPop 2025 estimates ${Math.round(populationTotal).toLocaleString()} people in ${areaName}; ${Math.round(populationUnserved).toLocaleString()} (${populationShare.toFixed(1)}%) fall in baseline health-grid cells more than 8 km from a facility.`
       : `No WorldPop summary is available for ${areaName}.`;
 
-    const travelProxyScore = active.cells.length
-      ? Math.round(active.cells.reduce((total, cell) => total + travelAdjustedScore(cell.properties), 0) / active.cells.length)
+    // Population-weighted indicators over the cells in the selected area.
+    const cellTotals = active.cells.reduce((totals, cell) => {
+      const p = cell.properties;
+      const people = Number(p.population) || 0;
+      totals.population += people;
+      totals.population2030 += Number(p.population_2030) || 0;
+      if (p.travel_min != null) {
+        totals.travelPeople += people;
+        totals.travelWeighted += people * Number(p.travel_min);
+      }
+      totals.nearRoad += people * (Number(p.road_access_share) || 0);
+      totals.flooded += people * (Number(p.flood_pop_share) || 0);
+      return totals;
+    }, { population: 0, population2030: 0, travelPeople: 0, travelWeighted: 0, nearRoad: 0, flooded: 0 });
+    const growthPct = cellTotals.population
+      ? (cellTotals.population2030 / cellTotals.population - 1) * 100
       : 0;
+    const averageTravel = cellTotals.travelPeople ? cellTotals.travelWeighted / cellTotals.travelPeople : null;
 
     document.getElementById("briefing-title").textContent = `${areaName} · Public-service access`;
-    document.getElementById("briefing-lead").textContent = `${populationLead} ${metrics.healthGaps} of ${active.settlements.length} mapped settlements are more than 5 km from a baseline health facility.`;
+    document.getElementById("briefing-lead").textContent = `${populationLead} WorldPop projects ${Math.round(cellTotals.population2030).toLocaleString()} people by 2030 (+${growthPct.toFixed(1)}%). ${metrics.healthGaps} of ${active.settlements.length} mapped settlements are more than 5 km from a baseline health facility.`;
     document.getElementById("briefing-kpis").innerHTML = [
       [Math.round(populationTotal).toLocaleString(), "WorldPop 2025 estimate"],
       [`${populationShare.toFixed(1)}%`, "Population in unserved health cells"],
-      [`${travelProxyScore}/100`, "Road-distance access proxy"],
+      [`+${Math.round(cellTotals.population2030 - cellTotals.population).toLocaleString()}`, "More residents by 2030 (WorldPop projection)"],
+      [formatMinutes(averageTravel), "Average road travel time to care"],
+      [formatShare(cellTotals.population ? cellTotals.nearRoad / cellTotals.population : 0), `Residents within ${roadAccessKm} km of a classified road`],
       [`${metrics.healthGaps}/${active.settlements.length}`, "Settlements > 5 km from baseline health"],
       [`${metrics.schoolReach}/${active.settlements.length}`, `Settlements within ${schoolRadiusKm} km of school`],
     ].map(([value, label]) => `<div class="briefing-kpi"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
     const signals = [
       `<strong>Health access:</strong> ${metrics.unservedCells} grid cells (${metrics.unservedArea.toFixed(0)} km²) are beyond the 8 km baseline threshold.`,
       `<strong>Education proximity:</strong> ${metrics.schoolReach} of ${active.settlements.length} mapped settlements are within ${schoolRadiusKm} km straight-line distance of a school.`,
-      `<strong>Road-distance access proxy:</strong> ${travelProxyScore}/100 when adjusting for facility distance, road network reach and mapped waterway context.`,
+      `<strong>Travel and roads:</strong> residents average ${escapeHtml(formatMinutes(averageTravel))} by road to the nearest facility; ${formatShare(cellTotals.population ? cellTotals.nearRoad / cellTotals.population : 0)} live within ${roadAccessKm} km of a classified road.`,
+      `<strong>Flood exposure:</strong> about ${Math.round(cellTotals.flooded).toLocaleString()} residents live in the 1-in-100-year river flood zone (JRC GloFAS).`,
       `<strong>Facility sources:</strong> ${active.facilities.length} baseline facilities inform the access grid; ${active.registry.features.length} operational facilities from the official MHFR registry are shown separately.`,
     ];
     document.getElementById("briefing-signals").innerHTML = signals.map((signal) => `<li>${signal}</li>`).join("");
@@ -1026,10 +1142,9 @@ async function init() {
     metrics.priorityCells.forEach((cell) => {
       const p = cell.properties;
       const point = turf.pointOnFeature(cell).geometry.coordinates;
-      const accessScore = travelAdjustedScore(p);
       const row = document.createElement("tr");
       row.className = "rec-row";
-      row.innerHTML = `<td>${escapeHtml(p.cell_id)}</td><td>${escapeHtml(p.dist_km)} km</td><td><span class="tag ${travelAdjustedLabel(accessScore)}">${accessScore}/100</span></td>`;
+      row.innerHTML = `<td>${escapeHtml(p.cell_id)}</td><td>${escapeHtml(growthText(p))}</td><td>${escapeHtml(p.dist_km)} km</td><td><span class="tag ${travelTimeTone(p.travel_min)}">${escapeHtml(formatMinutes(p.travel_min))}</span></td>`;
       row.addEventListener("click", () => map.setView([point[1], point[0]], 12));
       tbody.appendChild(row);
     });
@@ -1061,8 +1176,8 @@ async function init() {
 
     const healthSite = computeSuggestedSites(active, "health", 5, 1)[0];
     if (healthSite) {
-      const text = `Plan a new health centre ${nearPlace(healthSite.site.properties.name)}: a 5 km catchment there would cover about ${fmt(healthSite.people)} people in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care.`;
-      actions.push({ text, html: `<strong>Best health-centre location:</strong> ${escapeHtml(nearPlace(healthSite.site.properties.name))}. A 5 km catchment there would cover about ${fmt(healthSite.people)} people in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care. ${button("Compare top 3 sites", 'data-action="suggest" data-value="health" data-radius="5"')}` });
+      const text = `Plan a new health centre ${nearPlace(healthSite.site.properties.name)}: a 5 km catchment there would cover about ${fmt(healthSite.people)} people by 2030 in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care. The site passes the flood, road, slope and land-cover checks.`;
+      actions.push({ text, html: `<strong>Best health-centre location:</strong> ${escapeHtml(nearPlace(healthSite.site.properties.name))}. A 5 km catchment there would cover about ${fmt(healthSite.people)} people by 2030 (WorldPop projection) in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care, and the site passes the flood, road, slope and land-cover checks. ${button("Compare top 3 sites", 'data-action="suggest" data-value="health" data-radius="5"')}` });
     }
 
     const remote = active.settlements
@@ -1194,14 +1309,18 @@ async function init() {
     const existingCandidates = state.scenarios
       .filter((candidate) => candidate.type === type)
       .map((candidate) => candidate.point.geometry.coordinates);
+    // Demand is weighted by each settlement's projected 2030 population.
+    const residents = (settlement) => Number(settlement.properties.population_2030 ?? settlement.properties.population) || 0;
     const demand = active.settlements.filter((settlement) => {
-      if (!(Number(settlement.properties.population) > 0)) return false;
+      if (!(residents(settlement) > 0)) return false;
       if ((nearest.get(settlement)?.distance ?? Infinity) <= radiusKm) return false;
       const coords = settlement.geometry.coordinates;
       return !existingCandidates.some((site) => quickKm(site, coords) <= radiusKm);
     });
     if (!demand.length) return [];
+    // Candidate locations must pass the server's flood, road, slope and land-cover checks.
     const reach = active.settlements.map((site) => {
+      if (site.properties.site_suitable === false) return [];
       const origin = site.geometry.coordinates;
       const covered = [];
       demand.forEach((settlement, index) => {
@@ -1218,7 +1337,7 @@ async function init() {
         let settlementCount = 0;
         covered.forEach((index) => {
           if (isCovered[index]) return;
-          people += Number(demand[index].properties.population);
+          people += residents(demand[index]);
           settlementCount += 1;
         });
         if (people > 0 && (!best || people > best.people)) best = { siteIndex, people, settlementCount };
@@ -1322,10 +1441,14 @@ async function init() {
       return;
     }
 
-    // Rank estimated candidates by residents newly brought within reach.
+    // Rank estimated candidates: physically suitable sites first, then by the
+    // residents newly brought within reach by 2030 (WorldPop projection).
+    const reach2030 = (candidate) =>
+      candidate.populationEstimate.additional_population_2030 ?? candidate.populationEstimate.additional_population_estimate;
+    const isSuitable = (candidate) => candidate.populationEstimate.site_suitability?.suitable !== false;
     const rankedCandidates = state.scenarios
       .filter((candidate) => candidate.populationEstimate)
-      .sort((a, b) => b.populationEstimate.additional_population_estimate - a.populationEstimate.additional_population_estimate);
+      .sort((a, b) => (isSuitable(b) - isSuitable(a)) || (reach2030(b) - reach2030(a)));
     const rankById = new Map(rankedCandidates.map((candidate, rank) => [candidate.id, rank + 1]));
     const showRanks = rankedCandidates.length > 1;
 
@@ -1401,11 +1524,12 @@ async function init() {
         const decision = document.createElement("p");
         decision.className = "scenario-decision";
         const runnerUp = rankedCandidates[1];
-        const margin = Math.round(
-          candidate.populationEstimate.additional_population_estimate
-          - runnerUp.populationEstimate.additional_population_estimate
-        );
-        decision.textContent = `Recommended of the ${rankedCandidates.length} sites compared: reaches ${margin.toLocaleString()} more people than Candidate ${runnerUp.id}.`;
+        const margin = Math.round(reach2030(candidate) - reach2030(runnerUp));
+        decision.textContent = !isSuitable(candidate)
+          ? `None of the ${rankedCandidates.length} sites passes the site checks; move them out of the flagged areas.`
+          : !isSuitable(runnerUp)
+            ? `Recommended of the ${rankedCandidates.length} sites compared: the only site without a blocking flood, road, slope or land-cover issue.`
+            : `Recommended of the ${rankedCandidates.length} sites compared: reaches ${margin.toLocaleString()} more people by 2030 than Candidate ${runnerUp.id}.`;
         card.appendChild(decision);
       }
 
@@ -1446,6 +1570,30 @@ async function init() {
         const detail = document.createElement("p");
         detail.textContent = `Within ${candidate.radius} km: ${Math.round(result.population_within_radius).toLocaleString()} estimated residents; ${Math.round(result.already_within_existing_service_radius).toLocaleString()} are already within an existing ${existingServiceLabel} zone.`;
         card.append(gain, detail);
+        if (result.additional_population_2030 != null) {
+          const future = document.createElement("p");
+          future.className = "scenario-future";
+          const added = result.additional_population_2030 - result.additional_population_estimate;
+          future.textContent = `By 2030 (WorldPop projection): ${Math.round(result.additional_population_2030).toLocaleString()} additional residents, ${added >= 0 ? "+" : ""}${Math.round(added).toLocaleString()} more than today.`;
+          card.appendChild(future);
+        }
+        if (result.site_suitability) {
+          const checks = document.createElement("div");
+          checks.className = "site-checks";
+          const heading = document.createElement("strong");
+          heading.textContent = result.site_suitability.suitable
+            ? "Site checks: no blocking issue"
+            : "Site checks: not suitable as placed";
+          const list = document.createElement("ul");
+          result.site_suitability.checks.forEach((check) => {
+            const item = document.createElement("li");
+            item.className = `site-check ${check.status}`;
+            item.textContent = `${check.label}: ${check.detail}`;
+            list.appendChild(item);
+          });
+          checks.append(heading, list);
+          card.appendChild(checks);
+        }
 
         const settlements = document.createElement("p");
         settlements.textContent = `Mapped settlements newly within the radius in the selected geography: +${metrics.gain} of ${metrics.total}.`;
@@ -1742,12 +1890,20 @@ async function init() {
 
   function planningPrompt(properties) {
     const prompts = [];
-    const accessScore = travelAdjustedScore(properties);
-    if (properties.dist_km > 8) prompts.push("Assess a new health post or outreach point");
-    else if (properties.dist_km > 5) prompts.push("Review outreach or mobile-clinic coverage");
-    if (properties.road_km < 1.5) prompts.push("Assess feeder-road access");
-    if (properties.water_km < 0.5) prompts.push("Verify local water-point access");
-    if (accessScore < 50) prompts.push(`Travel-adjusted proxy is weak (${accessScore}/100)`);
+    if (properties.dist_km > 8) prompts.push("Assess a new health post or health centre");
+    else if (properties.dist_km > 5) prompts.push("Extend outreach or mobile-clinic coverage");
+    if (Number(properties.growth) >= 1) {
+      prompts.push(`+${Math.round(properties.growth).toLocaleString()} residents expected by 2030`);
+    }
+    if (Number(properties.population) > 0 && properties.road_access_share < 0.5) {
+      prompts.push(`only ${formatShare(properties.road_access_share)} of residents within ${roadAccessKm} km of a classified road`);
+    }
+    if (properties.flood_area_share >= 0.05) {
+      prompts.push(`${formatShare(properties.flood_area_share)} of the cell in the 1-in-100-year flood zone: site outside it`);
+    }
+    if (properties.travel_min != null && properties.travel_min > 60) {
+      prompts.push(`${formatMinutes(properties.travel_min)} by road to the nearest facility`);
+    }
     return prompts.length ? prompts.join("; ") : "Review service quality and staffing";
   }
 
@@ -1814,10 +1970,13 @@ async function init() {
             title: "Health access",
             badge: { text: coverageOf(), tone: coverageOf() },
             rows: [
+              ["Residents 2025 (WorldPop)", Number(p.population || 0).toLocaleString()],
+              ["Projected 2030", growthText(p)],
               ["Nearest facility", distText],
-              ["Road length in cell", `${p.road_km} km`],
-              ["Mapped waterways", `${p.water_km} km`],
-              ["Baseline score (55/25/20)", p.priority_score],
+              ["Road travel time to care", formatMinutes(p.travel_min)],
+              [`Residents within ${roadAccessKm} km of a classified road`, formatShare(p.road_access_share)],
+              ["Area in 1-in-100-year flood zone", formatShare(p.flood_area_share)],
+              [`Baseline score (${baselineWeightsLabel})`, p.priority_score],
             ],
             meter: { label: "Priority score (current weights)", percent: score / 2 * 100, text: score.toFixed(3) },
             note: planningPrompt(p),
@@ -1856,7 +2015,6 @@ async function init() {
       const p = cell.properties;
       const rank = index + 1;
       const point = turf.pointOnFeature(cell).geometry.coordinates;
-      const accessScore = travelAdjustedScore(p);
       const isNew = !state.baselineTopCells.has(Number(p.cell_id));
       L.marker([point[1], point[0]], {
         icon: L.divIcon({
@@ -1873,9 +2031,11 @@ async function init() {
           title: isNew ? "New in top 12 with these weights" : "Highest-priority health gap",
           badge: { text: p.coverage, tone: p.coverage },
           rows: [
+            ["Residents 2025 → 2030", `${Number(p.population || 0).toLocaleString()} → ${growthText(p)}`],
             ["Nearest facility", p.dist_km == null ? "unavailable" : `${p.dist_km} km`],
-            ["Road length in cell", `${p.road_km} km`],
-            ["Road-distance access proxy", `${accessScore}/100`],
+            ["Road travel time to care", formatMinutes(p.travel_min)],
+            [`Within ${roadAccessKm} km of a classified road`, formatShare(p.road_access_share)],
+            ["Area in flood zone", formatShare(p.flood_area_share)],
           ],
           meter: { label: "Priority score (current weights)", percent: Number(cellScore(p)) / 2 * 100, text: Number(cellScore(p)).toFixed(3) },
           note: planningPrompt(p),
@@ -1890,12 +2050,13 @@ async function init() {
       row.className = "rec-row";
       row.innerHTML = `
         <td>${rank}${isNew ? ' <span class="tag new-rank" title="Not in the baseline top 12">new</span>' : ""}</td>
-        <td>${escapeHtml(cellScore(p))}</td>
+        <td>${escapeHtml(Number(cellScore(p)).toFixed(3))}</td>
         <td><span class="tag ${escapeHtml(p.coverage)}">${escapeHtml(p.coverage)}</span></td>
+        <td>${escapeHtml(growthText(p))}</td>
         <td>${escapeHtml(p.dist_km)} km</td>
-        <td>${escapeHtml(p.road_km)} km</td>
-        <td>${escapeHtml(p.water_km)} km</td>
-        <td><span class="tag ${travelAdjustedLabel(accessScore)}">${accessScore}/100</span></td>
+        <td><span class="tag ${travelTimeTone(p.travel_min)}">${escapeHtml(formatMinutes(p.travel_min))}</span></td>
+        <td>${escapeHtml(formatShare(p.road_access_share))}</td>
+        <td>${escapeHtml(formatShare(p.flood_area_share))}</td>
         <td>${escapeHtml(planningPrompt(p))}</td>`;
       row.addEventListener("click", () => map.setView([point[1], point[0]], 12));
       recBody.appendChild(row);
@@ -2602,7 +2763,7 @@ async function init() {
     state.scenarioResultsCollapsed = false;
     placeScenarioButton.textContent = "Add another site";
     const totalPeople = added.reduce((sum, candidate) => sum + candidate.suggestion.people, 0);
-    const message = `${added.length} suggested ${label} site${added.length === 1 ? "" : "s"} added; together they could bring about ${Math.round(totalPeople).toLocaleString()} people in mapped settlements within ${radiusKm} km. Estimating full reach…`;
+    const message = `${added.length} suggested ${label} site${added.length === 1 ? "" : "s"} added. Each passes the flood, road, slope and land-cover checks; together they could bring about ${Math.round(totalPeople).toLocaleString()} people in mapped settlements (2030 projection) within ${radiusKm} km. Estimating full reach…`;
     scenarioStatus.textContent = message;
     showScenarioNotice("Suggested sites added", message, "success", true);
     render(activeData());
@@ -2670,25 +2831,20 @@ async function init() {
   gapServedInput.addEventListener("input", scheduleGapAnalysis);
   gapUnderservedInput.addEventListener("input", scheduleGapAnalysis);
 
-  const weightInputs = {
-    distance: document.getElementById("w-distance"),
-    road: document.getElementById("w-road"),
-    water: document.getElementById("w-water"),
-  };
-  const weightOutputs = {
-    distance: document.getElementById("w-distance-value"),
-    road: document.getElementById("w-road-value"),
-    water: document.getElementById("w-water-value"),
-  };
+  const weightInputs = Object.fromEntries(
+    Object.keys(PRIORITY_CRITERIA).map((key) => [key, document.getElementById(`w-${key}`)])
+  );
+  const weightOutputs = Object.fromEntries(
+    Object.keys(PRIORITY_CRITERIA).map((key) => [key, document.getElementById(`w-${key}-value`)])
+  );
   const priorityWeightsStatus = document.getElementById("priority-weights-status");
-  const BASELINE_WEIGHTS = { distance: 55, road: 25, water: 20 };
   let priorityTimer = null;
 
   function showNormalisedWeights() {
     const raw = Object.fromEntries(
       Object.entries(weightInputs).map(([key, input]) => [key, Number(input.value)])
     );
-    const total = raw.distance + raw.road + raw.water;
+    const total = Object.values(raw).reduce((sum, value) => sum + value, 0);
     Object.entries(raw).forEach(([key, value]) => {
       weightOutputs[key].textContent = total ? `${Math.round(value / total * 100)}%` : "0%";
     });
@@ -2707,9 +2863,7 @@ async function init() {
     priorityWeightsStatus.textContent = "Re-scoring cells in SQLite...";
     priorityTimer = setTimeout(async () => {
       const params = new URLSearchParams({
-        w_distance: String(raw.distance),
-        w_road: String(raw.road),
-        w_water: String(raw.water),
+        ...Object.fromEntries(Object.keys(PRIORITY_CRITERIA).map((key) => [`w_${key}`, String(raw[key])])),
         served_km: String(state.gapServedKm),
       });
       try {
@@ -2727,7 +2881,7 @@ async function init() {
           .filter((id) => !state.baselineTopCells.has(Number(id))).length;
         const w = result.weights;
         priorityWeightsStatus.textContent =
-          `Weights ${w.distance} / ${w.road} / ${w.water}%. ` +
+          `Weights: ${Object.entries(PRIORITY_CRITERIA).map(([key, label]) => `${label} ${w[key]}%`).join(", ")}. ` +
           (changed
             ? `${changed} of the district top 12 cells differ from the baseline ranking.`
             : "District top 12 matches the baseline ranking.");
@@ -2748,6 +2902,21 @@ async function init() {
     });
     schedulePriorityScenario();
   });
+  Object.entries(BASELINE_WEIGHTS).forEach(([key, value]) => {
+    weightInputs[key].value = String(value);
+  });
+  const resetWeightsButton = document.getElementById("reset-weights");
+  resetWeightsButton.textContent = `Reset to baseline (${baselineWeightsLabel})`;
+  resetWeightsButton.title = `Restore ${baselineWeightsText}`;
+  const scales = priorityScenario.scales;
+  document.getElementById("method-priority").textContent =
+    `The priority score combines WorldPop's 2030 projected residents per cell (full score at ${Math.round(scales.population_full).toLocaleString()}, ` +
+    `the 75th percentile of cells), residents added 2025–2030 (full score at ${Math.round(scales.growth_full).toLocaleString()}), ` +
+    `straight-line distance to the nearest facility (full score at ${scales.distance_full_m / 1000} km), the share of residents within ${roadAccessKm} km ` +
+    `of a classified road, and the share of the cell outside the JRC 1-in-100-year flood zone (baseline ${baselineWeightsText}; adjustable under Priority weights). ` +
+    `Served cells are multiplied by ${scales.served_multiplier}, and border slivers under ${priorityScenario.min_ranked_cell_km2} km² are scored but not ranked. ` +
+    `WorldPop projects similar growth rates across most cells, so growth mostly follows where people already live.`;
+  document.getElementById("method-settlement-count").textContent = settlements.features.length.toLocaleString();
   showNormalisedWeights();
   schoolRadiusInput.addEventListener("change", () => {
     const value = Number(schoolRadiusInput.value);
@@ -2780,57 +2949,11 @@ async function init() {
     });
   });
 
-  // ---- Collapsible sidebar sections (state remembered per browser) ----
-  const SECTION_STATE_KEY = "dd-sdss-collapsed-sections";
-  const DEFAULT_COLLAPSED = ["School coverage profile", "Population by health access", "Legend"];
-  let collapsedSections = new Set(DEFAULT_COLLAPSED);
-  try {
-    const saved = JSON.parse(localStorage.getItem(SECTION_STATE_KEY) || "null");
-    if (Array.isArray(saved)) collapsedSections = new Set(saved);
-  } catch { /* storage unavailable: use defaults */ }
-  const saveSectionState = () => {
-    try { localStorage.setItem(SECTION_STATE_KEY, JSON.stringify([...collapsedSections])); } catch { /* ignore */ }
-  };
-  function setSectionCollapsed(section, collapsed, remember = true) {
-    const toggle = section.querySelector(":scope > h2 > .section-toggle");
-    const body = section.querySelector(":scope > .section-body");
-    if (!toggle || !body) return;
-    section.classList.toggle("is-collapsed", collapsed);
-    body.hidden = collapsed;
-    toggle.setAttribute("aria-expanded", String(!collapsed));
-    if (remember) {
-      if (collapsed) collapsedSections.add(toggle.dataset.title);
-      else collapsedSections.delete(toggle.dataset.title);
-      saveSectionState();
-    }
-  }
-  document.querySelectorAll(".panel > section").forEach((section, index) => {
-    const heading = section.querySelector(":scope > h2");
-    if (!heading) return;
-    const title = heading.textContent.trim();
-    const body = document.createElement("div");
-    body.className = "section-body";
-    body.id = `section-body-${index}`;
-    [...section.childNodes].filter((node) => node !== heading).forEach((node) => body.appendChild(node));
-    section.appendChild(body);
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "section-toggle";
-    toggle.dataset.title = title;
-    toggle.setAttribute("aria-controls", body.id);
-    toggle.innerHTML = `<span>${escapeHtml(title)}</span><span class="section-chevron" aria-hidden="true"></span>`;
-    heading.replaceChildren(toggle);
-    section.classList.add("collapsible");
-    toggle.addEventListener("click", () =>
-      setSectionCollapsed(section, !section.classList.contains("is-collapsed")));
-    setSectionCollapsed(section, collapsedSections.has(title), false);
-  });
-
-  // Open the sidebar section holding `element` and bring it into view.
+  // Open the tool panel holding `element` and bring it into view.
   function revealControl(element) {
     if (!element) return;
-    const section = element.closest(".panel > section");
-    if (section?.classList.contains("is-collapsed")) setSectionCollapsed(section, false);
+    const view = element.closest("[data-tool-view]");
+    if (view) openTool(view.dataset.toolView);
     const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     element.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
   }
@@ -2919,11 +3042,150 @@ async function init() {
   bind("lyr-buildings", layers.buildings);
   bind("lyr-slope", layers.slope);
   bind("lyr-land-cover", layers.landCover);
+  bind("lyr-flood", layers.flood);
   buildingToggle.addEventListener("change", loadBuildingFeatures);
   map.on("moveend", scheduleBuildingLoad);
 }
 
+// ---- App shell: tool rail, floating tool panel and insights drawer ----
+const COMPACT_QUERY = window.matchMedia("(max-width: 900px)");
+const TOOL_KEY = "dd-sdss-active-tool";
+const DECK_KEY = "dd-sdss-insights-collapsed";
+const workspace = document.querySelector(".workspace");
+const toolPanel = document.getElementById("tool-panel");
+const toolPanelTitle = document.getElementById("tool-panel-title");
+const toolPanelBody = toolPanel.querySelector(".tool-panel-body");
+const toolButtons = [...document.querySelectorAll(".tool-button")];
+const toolViews = [...document.querySelectorAll("[data-tool-view]")];
+let activeTool = null;
+
+function storeSetting(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* storage unavailable */ }
+}
+function readSetting(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function openTool(name) {
+  const view = toolViews.find((item) => item.dataset.toolView === name);
+  if (!view) return;
+  const switching = activeTool !== name;
+  activeTool = name;
+  toolViews.forEach((item) => { item.hidden = item !== view; });
+  toolButtons.forEach((button) => {
+    const selected = button.dataset.tool === name;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-expanded", String(selected));
+  });
+  toolPanelTitle.textContent = view.dataset.title;
+  toolPanel.hidden = false;
+  if (switching) toolPanelBody.scrollTop = 0;
+  storeSetting(TOOL_KEY, name);
+}
+
+function closeTool() {
+  activeTool = null;
+  toolPanel.hidden = true;
+  toolButtons.forEach((button) => {
+    button.classList.remove("active");
+    button.setAttribute("aria-expanded", "false");
+  });
+  storeSetting(TOOL_KEY, "");
+}
+
+toolButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    if (activeTool === button.dataset.tool) closeTool();
+    else openTool(button.dataset.tool);
+  });
+});
+document.getElementById("close-tool-panel").addEventListener("click", () => {
+  const button = toolButtons.find((item) => item.dataset.tool === activeTool);
+  closeTool();
+  button?.focus();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !activeTool) return;
+  if (document.querySelector(".custom-select.is-open")) return; // let the dropdown close first
+  const button = toolButtons.find((item) => item.dataset.tool === activeTool);
+  closeTool();
+  button?.focus();
+});
+// On small screens the panel covers the map, so close it when the next step is a map click.
+["place-scenario", "suggest-sites", "find-route"].forEach((id) => {
+  document.getElementById(id)?.addEventListener("click", () => {
+    if (COMPACT_QUERY.matches) closeTool();
+  });
+});
+
+const savedTool = readSetting(TOOL_KEY);
+if (savedTool) openTool(savedTool);
+else if (savedTool === null && !COMPACT_QUERY.matches) openTool("overview");
+
+const insightsDeck = document.getElementById("insights-deck");
+const deckToggle = document.getElementById("toggle-deck");
+function setDeckCollapsed(collapsed) {
+  insightsDeck.classList.toggle("collapsed", collapsed);
+  deckToggle.setAttribute("aria-expanded", String(!collapsed));
+  deckToggle.title = collapsed ? "Show the insights drawer" : "Hide the insights drawer";
+  storeSetting(DECK_KEY, collapsed ? "1" : "0");
+}
+deckToggle.addEventListener("click", () => setDeckCollapsed(!insightsDeck.classList.contains("collapsed")));
+document.querySelectorAll(".analysis-tab").forEach((tab) => {
+  tab.addEventListener("click", () => setDeckCollapsed(false));
+});
+const savedDeck = readSetting(DECK_KEY);
+setDeckCollapsed(savedDeck === null ? COMPACT_QUERY.matches : savedDeck === "1");
+
+const DECK_SIZE_KEY = "dd-sdss-insights-height";
+const deckResizer = document.getElementById("deck-resizer");
+const DECK_MIN = 140;
+const deckMax = () => Math.max(DECK_MIN, Math.round(workspace.getBoundingClientRect().height * 0.7));
+function setDeckSize(pixels, remember = true) {
+  const size = Math.min(deckMax(), Math.max(DECK_MIN, Math.round(pixels)));
+  insightsDeck.style.setProperty("--deck-size", `${size}px`);
+  deckResizer.setAttribute("aria-valuenow", String(size));
+  if (remember) storeSetting(DECK_SIZE_KEY, String(size));
+}
+const savedDeckSize = Number(readSetting(DECK_SIZE_KEY));
+if (savedDeckSize > 0) setDeckSize(savedDeckSize, false);
+deckResizer.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  if (insightsDeck.classList.contains("collapsed")) setDeckCollapsed(false);
+  const bottom = insightsDeck.getBoundingClientRect().bottom;
+  insightsDeck.classList.add("resizing");
+  deckResizer.setPointerCapture(event.pointerId);
+  const move = (moveEvent) => setDeckSize(bottom - moveEvent.clientY);
+  const stop = () => {
+    insightsDeck.classList.remove("resizing");
+    deckResizer.removeEventListener("pointermove", move);
+    deckResizer.removeEventListener("pointerup", stop);
+    deckResizer.removeEventListener("pointercancel", stop);
+  };
+  deckResizer.addEventListener("pointermove", move);
+  deckResizer.addEventListener("pointerup", stop);
+  deckResizer.addEventListener("pointercancel", stop);
+});
+deckResizer.addEventListener("dblclick", () => setDeckCollapsed(!insightsDeck.classList.contains("collapsed")));
+deckResizer.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  if (insightsDeck.classList.contains("collapsed")) setDeckCollapsed(false);
+  const current = insightsDeck.getBoundingClientRect().height;
+  setDeckSize(current + (event.key === "ArrowUp" ? 40 : -40));
+});
+
+// Keep Leaflet's size in step with the layout, and keep the floating panel
+// clear of the insights drawer.
+if ("ResizeObserver" in window) {
+  new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(map.getContainer());
+  new ResizeObserver(([entry]) => {
+    workspace.style.setProperty("--deck-height", `${Math.round(entry.target.getBoundingClientRect().height)}px`);
+  }).observe(insightsDeck);
+}
+
 init().catch((err) => {
+  console.error(err);
   mapStatus.hidden = false;
   mapStatus.textContent = `Could not load the Dedza planning layers: ${err.message}`;
   document.getElementById("kpis").innerHTML =

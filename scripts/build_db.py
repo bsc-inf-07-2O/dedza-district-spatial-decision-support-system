@@ -9,12 +9,39 @@ from pathlib import Path
 
 import duckdb
 
+if __package__ in (None, ""):  # run as `python scripts/build_db.py`
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.planning_analysis import (  # noqa: E402
+    PLANNING_LAYER_PATHS,
+    ROAD_ACCESS_KM,
+    cell_indicators,
+    planning_grids,
+    travel_minutes_to_care,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
 PROCESSED = ROOT / "data" / "processed"
 DB_PATH = PROCESSED / "dedza.sqlite"
 
 ADM2 = RAW / "MWI_ADM2_simplified.geojson"
+
+# Baseline weights of the facility-siting priority score, stored in the meta
+# table (the app reads them from there). Every criterion is scaled 0-1:
+#   population - residents projected for 2030 (demand the facility must serve)
+#   growth     - residents added 2025-2030 (supports the growing population)
+#   distance   - straight-line distance to the nearest facility (need)
+#   road       - share of residents within ROAD_ACCESS_KM of a classified road
+#   flood      - share of the cell outside the 1-in-100-year flood zone
+PRIORITY_WEIGHTS = {"population": 0.30, "growth": 0.15, "distance": 0.30, "road": 0.15, "flood": 0.10}
+# Population and growth reach a full score at this percentile of the cells, so
+# the scale comes from the data rather than a fixed number.
+FULL_SCORE_PERCENTILE = 0.75
+# Distance reaches a full score at the "unserved" threshold (8 km).
+DISTANCE_FULL_M = 8000.0
+SERVED_MULTIPLIER = 0.35
 
 # Facilities in neighbouring districts within this distance of the boundary are
 # included in the nearest-facility distance (not in the Dedza facility layer).
@@ -28,7 +55,8 @@ SOURCES = (
     "Malawi Health Facility Registry (MHFR, Ministry of Health); "
     "Malawi schools point dataset; "
     "GRID3 Malawi Settlement Extents v3.0 (CIESIN, CC BY-SA 4.0); "
-    "WorldPop 2025 constrained population R2025A v1 (CC BY 4.0); "
+    "WorldPop 2020, 2025 and 2030 (projected) constrained population R2025A v1 (CC BY 4.0); "
+    "JRC Copernicus EMS GloFAS global river flood hazard map v2.1, 1-in-100-year (ODbL 1.0); "
     "NSO Malawi Traditional Authority boundaries via geoBoundaries/HDX (CC BY 3.0 IGO); "
     "geoBoundaries MWI ADM2 district boundary; "
     "HOT OpenStreetMap roads, waterways and place names (ODbL); "
@@ -38,6 +66,20 @@ SOURCES = (
 
 # Tables created by other import scripts; a rebuild carries them over.
 IMPORTED_TABLES = ("schools", "settlements", "osm_places", "mhfr_facilities", "population_summary")
+
+# Classified roads (OSM trunk to tertiary): the district and national network,
+# used for the road-access indicator. Many OSM "residential"/"unclassified"
+# ways in rural Malawi are village tracks, so they are not counted here.
+ACCESS_ROADS = (
+    "motorway",
+    "trunk",
+    "primary",
+    "secondary",
+    "tertiary",
+    "primary_link",
+    "secondary_link",
+    "tertiary_link",
+)
 
 MAJOR_ROADS = (
     "motorway",
@@ -101,7 +143,8 @@ def main() -> None:
     roads_path = source_dir / "hotosm_mwi_roads_osm_shp" / "roads_lines.shp"
     waterways_path = source_dir / "hotosm_mwi_waterways_osm_shp" / "waterways_lines.shp"
     missing = [
-        path for path in (facilities_path, roads_path, waterways_path) if not path.is_file()
+        path for path in (facilities_path, roads_path, waterways_path, *PLANNING_LAYER_PATHS)
+        if not path.is_file()
     ]
     if missing:
         parser.error(
@@ -302,6 +345,57 @@ def main() -> None:
         """
     )
 
+    print(f"Buffering classified roads by {ROAD_ACCESS_KM:g} km...")
+    road_buffer = json.loads(con.execute(
+        f"""
+        SELECT ST_AsGeoJSON(ST_Transform(
+            ST_Buffer(ST_Collect(list(ST_Transform(r.geom, 'EPSG:4326', 'EPSG:32736'))), ?),
+            'EPSG:32736', 'EPSG:4326'))
+        FROM roads_clip r
+        WHERE lower({highway_sql}) IN {ACCESS_ROADS}
+        """,
+        [ROAD_ACCESS_KM * 1000],
+    ).fetchone()[0])
+
+    print("Population (2020/2025/2030), road access and flood exposure per cell...")
+    cell_rows_geo = con.execute(
+        "SELECT cell_id, ST_AsGeoJSON(geom), ST_X(centroid), ST_Y(centroid) FROM cells"
+    ).fetchall()
+    grids = planning_grids(json.loads(boundary_geojson))
+    indicators = cell_indicators(grids, [(cid, gj) for cid, gj, _, _ in cell_rows_geo], road_buffer)
+
+    print("Road travel time from each cell's population centre to the nearest facility...")
+    origins = {
+        int(cid): indicators[int(cid)]["pop_centre"] or (lon, lat)
+        for cid, _, lon, lat in cell_rows_geo
+    }
+    travel = travel_minutes_to_care(
+        origins, con.execute("SELECT ST_X(geom), ST_Y(geom) FROM facilities_access").fetchall()
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE cell_planning (
+            cell_id BIGINT, population_2020 DOUBLE, population DOUBLE, population_2030 DOUBLE,
+            road_access_share DOUBLE, flood_area_share DOUBLE, flood_pop_share DOUBLE,
+            travel_min DOUBLE
+        )
+        """
+    )
+    con.executemany(
+        "INSERT INTO cell_planning VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                cid, v["population_2020"], v["population"], v["population_2030"],
+                v["road_access_share"], v["flood_area_share"], v["flood_pop_share"], travel[cid],
+            )
+            for cid, v in indicators.items()
+        ],
+    )
+    population_totals = {year: sum(v[key] for v in indicators.values()) for year, key in (
+        (2020, "population_2020"), (2025, "population"), (2030, "population_2030"))}
+    print("Population in grid cells: " + ", ".join(
+        f"{year}: {value:,.0f}" for year, value in population_totals.items()))
+
     con.execute(
         """
         CREATE OR REPLACE TABLE cell_stats AS
@@ -349,15 +443,29 @@ def main() -> None:
             COALESCE(r.road_km, 0) AS road_km,
             COALESCE(w.water_km, 0) AS water_km,
             COALESCE(fc.facilities_in_cell, 0) AS facilities_in_cell,
+            p.population_2020,
+            p.population,
+            p.population_2030,
+            p.population_2030 - p.population AS growth,
+            p.road_access_share,
+            p.flood_area_share,
+            p.flood_pop_share,
+            p.travel_min,
             c.geom
         FROM cells c
         LEFT JOIN fac_dist f USING (cell_id)
         LEFT JOIN fac_count fc USING (cell_id)
         LEFT JOIN road_len r USING (cell_id)
         LEFT JOIN water_len w USING (cell_id)
+        LEFT JOIN cell_planning p USING (cell_id)
         """
     )
 
+    pop_full, growth_full = con.execute(
+        "SELECT quantile_cont(population_2030, ?), quantile_cont(growth, ?) FROM cell_stats",
+        [FULL_SCORE_PERCENTILE, FULL_SCORE_PERCENTILE],
+    ).fetchone()
+    print(f"Full-score scales: population 2030 {pop_full:,.0f}, growth {growth_full:,.0f}")
     con.execute(
         """
         CREATE OR REPLACE TABLE cell_analysis AS
@@ -383,12 +491,21 @@ def main() -> None:
         )
         SELECT *,
                (
-                   LEAST(COALESCE(dist_facility_m, 16000) / 8000.0, 2.0) * 0.55
-                   + (1 - LEAST(road_km / 8.0, 1.0)) * 0.25
-                   + (1 - LEAST(water_km / 4.0, 1.0)) * 0.20
-               ) * CASE WHEN coverage = 'served' THEN 0.35 ELSE 1.0 END AS priority_score
+                   LEAST(population_2030 / $pop_full, 1.0) * $w_population
+                   + LEAST(GREATEST(growth, 0) / $growth_full, 1.0) * $w_growth
+                   + LEAST(COALESCE(dist_facility_m, $dist_full) / $dist_full, 1.0) * $w_distance
+                   + road_access_share * $w_road
+                   + (1 - flood_area_share) * $w_flood
+               ) * CASE WHEN coverage = 'served' THEN $served_multiplier ELSE 1.0 END AS priority_score
         FROM classified
-        """
+        """,
+        {
+            "pop_full": float(pop_full),
+            "growth_full": float(growth_full),
+            "dist_full": DISTANCE_FULL_M,
+            "served_multiplier": SERVED_MULTIPLIER,
+            **{f"w_{key}": value for key, value in PRIORITY_WEIGHTS.items()},
+        },
     )
 
     stats = con.execute(
@@ -451,6 +568,14 @@ def main() -> None:
             road_km REAL,
             water_km REAL,
             facilities_in_cell INTEGER,
+            population_2020 REAL,
+            population REAL,
+            population_2030 REAL,
+            growth REAL,
+            road_access_share REAL,
+            flood_area_share REAL,
+            flood_pop_share REAL,
+            travel_min REAL,
             coverage TEXT,
             road_access TEXT,
             water_access TEXT,
@@ -463,9 +588,13 @@ def main() -> None:
             lon REAL,
             lat REAL,
             coverage TEXT,
+            population REAL,
+            population_2030 REAL,
+            growth REAL,
             dist_facility_km REAL,
-            road_km REAL,
-            water_km REAL,
+            travel_min REAL,
+            road_access_share REAL,
+            flood_area_share REAL,
             priority_score REAL,
             action TEXT
         );
@@ -518,82 +647,80 @@ def main() -> None:
             cur.execute("INSERT INTO waterways (waterway, name, geojson) VALUES (?,?,?)", (waterway, name, gj))
     print("Waterways stored:", cur.execute("SELECT COUNT(*) FROM waterways").fetchone()[0])
 
+    cell_columns = (
+        "cell_id", "lon", "lat", "area_km2", "dist_facility_m", "road_km", "water_km",
+        "facilities_in_cell", "population_2020", "population", "population_2030", "growth",
+        "road_access_share", "flood_area_share", "flood_pop_share", "travel_min",
+        "coverage", "road_access", "water_access", "priority_score",
+    )
     cell_rows = con.execute(
-        """
-        SELECT cell_id, lon, lat, area_km2, dist_facility_m, road_km, water_km,
-               facilities_in_cell, coverage, road_access, water_access,
-               priority_score, ST_AsGeoJSON(geom)
-        FROM cell_analysis
-        """
+        f"SELECT {', '.join(cell_columns)}, ST_AsGeoJSON(geom) FROM cell_analysis ORDER BY cell_id"
     ).fetchall()
-    for (
-        cell_id, lon, lat, area_km2, dist_m, road_km, water_km, n_in,
-        coverage, road_access, water_access, priority, gj,
-    ) in cell_rows:
-        cur.execute(
-            """INSERT INTO cells (
-                cell_id, lon, lat, area_km2, dist_facility_m, road_km, water_km,
-                facilities_in_cell, coverage, road_access, water_access,
-                priority_score, geojson
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                int(cell_id), float(lon), float(lat), float(area_km2),
-                None if dist_m is None else float(dist_m),
-                float(road_km), float(water_km), int(n_in),
-                coverage, road_access, water_access, float(priority), gj,
-            ),
-        )
+    cur.executemany(
+        f"INSERT INTO cells ({', '.join(cell_columns)}, geojson) "
+        f"VALUES ({', '.join('?' * (len(cell_columns) + 1))})",
+        cell_rows,
+    )
 
+    # Each action is generated from the cell's own calculated indicators.
     recommendation_rows = con.execute(
         """
         WITH ranked AS (
             SELECT
                 ROW_NUMBER() OVER (ORDER BY priority_score DESC, cell_id DESC) AS rank,
-                cell_id, lon, lat, coverage, dist_facility_m, road_km, water_km,
-                priority_score,
+                *,
                 CASE
                     WHEN dist_facility_m IS NULL OR dist_facility_m > 8000
-                        THEN 'Site a new health post or outreach clinic'
+                        THEN 'Site a new health post or health centre'
                     WHEN dist_facility_m > 5000
-                        THEN 'Upgrade outreach / mobile clinic coverage'
+                        THEN 'Extend outreach / mobile clinic coverage'
                     ELSE ''
                 END AS health_action,
-                CASE WHEN road_km < 1.5
-                    THEN 'Prioritise feeder-road improvement' ELSE '' END AS road_action,
-                CASE WHEN water_km < 0.5
-                    THEN 'Assess WASH / borehole need (far from mapped waterways)'
-                    ELSE '' END AS water_action
+                CASE WHEN growth >= 1 THEN format(
+                    'Plan capacity for {:,} more residents by 2030 (+{:.0f}%)',
+                    CAST(ROUND(growth) AS BIGINT), growth / NULLIF(population, 0) * 100
+                ) ELSE '' END AS growth_action,
+                CASE WHEN road_access_share < 0.5 THEN format(
+                    'Only {:.0f}% of residents live within {} km of a classified road: pair the site with feeder-road access',
+                    road_access_share * 100, $road_km
+                ) ELSE '' END AS road_action,
+                CASE WHEN flood_area_share >= 0.05 THEN format(
+                    '{:.0f}% of the cell is in the 1-in-100-year flood zone: choose a site outside it',
+                    flood_area_share * 100
+                ) ELSE '' END AS flood_action
             FROM cell_analysis
-            WHERE area_km2 >= ?
+            WHERE area_km2 >= $min_km2
         )
         SELECT
             rank, cell_id, lon, lat, coverage,
-            ROUND(dist_facility_m / 1000.0, 2),
-            ROUND(road_km, 2), ROUND(water_km, 2), ROUND(priority_score, 3),
+            ROUND(population), ROUND(population_2030), ROUND(growth),
+            ROUND(dist_facility_m / 1000.0, 2), ROUND(travel_min, 1),
+            ROUND(road_access_share, 3), ROUND(flood_area_share, 3), ROUND(priority_score, 3),
             CASE
-                WHEN health_action = '' AND road_action = '' AND water_action = ''
+                WHEN health_action = '' AND growth_action = '' AND road_action = '' AND flood_action = ''
                     THEN 'Monitor service quality and staffing'
                 ELSE CONCAT_WS(
                     '; ',
                     NULLIF(health_action, ''),
+                    NULLIF(growth_action, ''),
                     NULLIF(road_action, ''),
-                    NULLIF(water_action, '')
+                    NULLIF(flood_action, '')
                 )
             END AS action
         FROM ranked
         WHERE rank <= 12
         ORDER BY rank
         """,
-        [MIN_RANKED_CELL_KM2],
+        {"min_km2": MIN_RANKED_CELL_KM2, "road_km": f"{ROAD_ACCESS_KM:g}"},
     ).fetchall()
-    for recommendation in recommendation_rows:
-        cur.execute(
-            """INSERT INTO recommendations (
-                rank, cell_id, lon, lat, coverage, dist_facility_km, road_km, water_km,
-                priority_score, action
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            recommendation,
-        )
+    cur.executemany(
+        """INSERT INTO recommendations (
+            rank, cell_id, lon, lat, coverage, population, population_2030, growth,
+            dist_facility_km, travel_min, road_access_share, flood_area_share,
+            priority_score, action
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        recommendation_rows,
+    )
 
     n_cells, served, underserved, unserved, avg_dist, area = stats
     meta = {
@@ -616,6 +743,15 @@ def main() -> None:
         "n_facilities_for_distance": str(n_access),
         "cross_border_km": f"{cross_border_m / 1000:g}",
         "min_ranked_cell_km2": f"{MIN_RANKED_CELL_KM2:g}",
+        **{f"weight_{key}": f"{value * 100:g}" for key, value in PRIORITY_WEIGHTS.items()},
+        "full_score_percentile": f"{FULL_SCORE_PERCENTILE:g}",
+        "population_full_score": f"{pop_full:.1f}",
+        "growth_full_score": f"{growth_full:.1f}",
+        "distance_full_m": f"{DISTANCE_FULL_M:g}",
+        "served_multiplier": f"{SERVED_MULTIPLIER:g}",
+        "road_access_km": f"{ROAD_ACCESS_KM:g}",
+        "flood_return_period_years": "100",
+        **{f"population_{year}": f"{value:.0f}" for year, value in population_totals.items()},
     }
     for k, v in meta.items():
         cur.execute("INSERT INTO meta VALUES (?,?)", (k, v))

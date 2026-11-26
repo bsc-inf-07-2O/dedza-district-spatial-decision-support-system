@@ -33,6 +33,14 @@ python scripts/import_worldpop.py
 
 Restart the app after importing. At startup it prepares the road network in the background ("Road network and scenario baselines ready." in the terminal) so the first site comparison is fast.
 
+Import the population-growth and flood-hazard layers (needed by the build; the clipped outputs are committed in `data/raw/`):
+
+```powershell
+python scripts/import_planning_layers.py
+```
+
+This downloads WorldPop R2025A constrained population for 2020 and 2030 (the 2030 raster is WorldPop's projection; CC BY 4.0) and the JRC Copernicus EMS GloFAS global river flood hazard map v2.1 tile for a 1-in-100-year flood, with its permanent-water layer (about 90 m; ODbL 1.0), and clips them to Dedza. The flood map is a global model, not an official national flood map.
+
 Import the public environmental rasters:
 
 ```powershell
@@ -54,10 +62,11 @@ This downloads the Microsoft Global ML Building Footprints tiles whose tile boun
 - Filter the map and service statistics by Dedza district or Traditional Authority (TA / sub-chief area).
 - Review mapped school and health-service access, compare route options, and explore Traditional Authority priorities.
 - Re-run the health-gap thresholds and the priority-score weights live in SQL and watch the map and ranking update.
-- **Suggest best sites:** a greedy maximal-coverage search over the GRID3 settlements proposes the 3 locations that would bring the most currently unserved people within the access radius, nudged off detected buildings.
-- Compare proposed or suggested school or health-centre sites using population estimates, settlement access, and—when imported—detected building footprints; sites are ranked by people newly reached, the best is marked as recommended, and each card warns when an existing facility (MHFR registry, any owner) is close enough to be duplicated.
+- **Suggest best sites:** a greedy maximal-coverage search over the GRID3 settlements proposes the 3 locations that would bring the most currently unserved people, weighted by their projected 2030 population, within the access radius. Only settlements that pass the site checks are candidate locations, and points are nudged off detected buildings.
+- **Site checks** (`/api/site-check`, and on every candidate card) sample real layers at the point: depth in the JRC 1-in-100-year flood zone and permanent water, distance to the nearest classified road, terrain slope and WorldCover land cover. Each is reported as pass, warn or fail with the measured value; a site with any fail is not suitable as placed.
+- Compare proposed or suggested school or health-centre sites using population reached now and by 2030, settlement road-time access, the site checks and—when imported—detected building footprints. Suitable sites rank first, then by 2030 population newly reached; each card warns when an existing facility (MHFR registry, any owner) is close enough to be duplicated.
 - The Briefing tab turns the analysis into **recommended actions**: which TA to prioritise, the best health-centre location, the largest remote settlements for outreach, and whether new schools or school capacity is the real need. They are also included in the CSV export.
-- View land-cover and terrain-slope layers for context, and export a selected-area CSV brief.
+- View the flood-zone, land-cover and terrain-slope layers, and export a selected-area CSV brief.
 
 ## Database design
 
@@ -66,8 +75,8 @@ The app uses two SQLite databases. `data/processed/dedza.sqlite` is committed. `
 | Table | Rows | Purpose | Key columns |
 |---|---|---|---|
 | `boundary` | 1 | Dedza district polygon | `name`, `geojson` |
-| `cells` | 486 | Analysis grid: one row per cell with its spatial-analysis results | `cell_id` (PK), `area_km2`, `dist_facility_m`, `road_km`, `water_km`, `facilities_in_cell`, `coverage`, `road_access`, `water_access`, `priority_score`, `geojson` |
-| `recommendations` | 12 | Top-ranked cells, ranked in SQL (border slivers under 1 km² excluded) | `rank` (PK), `cell_id` → `cells.cell_id`, `dist_facility_km`, `priority_score`, `action` |
+| `cells` | 486 | Analysis grid: one row per cell with its spatial-analysis results | `cell_id` (PK), `area_km2`, `dist_facility_m`, `road_km`, `water_km`, `facilities_in_cell`, `population_2020`, `population`, `population_2030`, `growth`, `road_access_share`, `flood_area_share`, `flood_pop_share`, `travel_min`, `coverage`, `road_access`, `water_access`, `priority_score`, `geojson` |
+| `recommendations` | 12 | Top-ranked cells, ranked in SQL (border slivers under 1 km² excluded), with actions generated from the cell's figures | `rank` (PK), `cell_id` → `cells.cell_id`, `population`, `population_2030`, `growth`, `dist_facility_km`, `travel_min`, `road_access_share`, `flood_area_share`, `priority_score`, `action` |
 | `facilities` | 34 | MOH baseline health facilities inside Dedza (points shown on the map) | `id` (PK), `name`, `facility_type`, `owner`, `lon`, `lat` |
 | `mhfr_facilities` | 52 | Operational facilities from the official MHFR registry (reference layer, incl. private and CHAM) | `source_id` (PK), `facility_code`, `name`, `facility_type`, `ownership`, `lon`, `lat` |
 | `schools` | 286 | School points (coordinates corrected) | `id` (PK), `name`, `school_id`, `status`, `lon`, `lat` |
@@ -76,11 +85,11 @@ The app uses two SQLite databases. `data/processed/dedza.sqlite` is committed. `
 | `roads` | 7,390 | OSM road lines; also the routing network | `id` (PK), `highway`, `name`, `geojson` |
 | `waterways` | 232 | OSM waterway lines | `id` (PK), `waterway`, `name`, `geojson` |
 | `population_summary` | 50 | WorldPop 2025 zonal totals per area and coverage class | (`area_name`, `coverage`, `source`, `year`) composite PK, `population_est` |
-| `meta` | 19 | Build parameters and provenance (thresholds, cross-border distance, sources) | `key` (PK), `value` |
+| `meta` | 34 | Build parameters and provenance (thresholds, cross-border distance, priority weights and score scales, population totals, sources) | `key` (PK), `value` |
 
 `data/processed/site_constraints.sqlite` is optional and not committed. `scripts/import_buildings.py` generates it, and its `buildings` table holds the detected footprints used to check candidate sites.
 
-Processing pipeline: source shapefiles and rasters → DuckDB Spatial (clip to boundary, project, nearest-facility distance, road and waterway length per cell, coverage classification, priority score, ranking) → SQLite tables → Flask JSON API (`/api/...`) → Leaflet map and Turf.js in the browser. Leaflet 1.9.4 and Turf.js are bundled in `static/vendor/`, so the app runs without internet; only the OpenStreetMap base tiles need a connection.
+Processing pipeline: source shapefiles and rasters → DuckDB Spatial (clip to boundary, project, nearest-facility distance, road and waterway length per cell, 2 km classified-road buffer, coverage classification, priority score, ranking) plus raster zonal statistics and road-network routing in `scripts/planning_analysis.py` (population 2020/2025/2030, road access, flood exposure, travel time to care) → SQLite tables → Flask JSON API (`/api/...`) → Leaflet map and Turf.js in the browser. Leaflet 1.9.4 and Turf.js are bundled in `static/vendor/`, so the app runs without internet; only the OpenStreetMap base tiles need a connection.
 
 ## Data and limitations
 
@@ -88,7 +97,7 @@ The app combines MOH Malawi baseline facilities, the [Malawi Health Facility Reg
 
 Results are preliminary screening estimates, not verified recommendations. Population estimates do not measure service capacity or actual uptake. Road routes and travel times use mapped roads and assumed speeds; they are not turn-by-turn navigation and omit traffic, road condition, seasonal closures, and access time. Settlement populations are WorldPop estimates inside GRID3 extents (about 704,000 of 1.02 million people); the rest live in hamlets and dispersed homesteads, which are not listed as settlements. Settlement names are borrowed from the nearest OSM place and are approximate.
 
-Building footprints may be incomplete or out of date and do not establish land ownership or vacancy. WorldCover does not verify parcels or wetlands, and the generalized slope layer is not suitable for engineering decisions. Water-point datasets do not currently cover Dedza (the Water Point Data Exchange returns no Dedza records), so mapped waterways remain a proxy, and the app does not assess flood risk. Sites and priority prompts require field verification; the app does not certify site suitability.
+Building footprints may be incomplete or out of date and do not establish land ownership or vacancy. WorldCover does not verify parcels or wetlands, and the generalized slope layer is not suitable for engineering decisions. Water-point datasets do not currently cover Dedza (the Water Point Data Exchange returns no Dedza records), so mapped waterways remain a proxy. Flood risk uses a global river-flood model (JRC GloFAS, about 90 m) and does not include flash floods or local drainage. WorldPop's 2030 figures are projections and grow at similar rates in most cells. Sites and priority prompts require field verification; the app does not certify site suitability.
 
 The database can be rebuilt when the source Lab 4 shapefiles are available. Put the Lab 4 source folders under `data\source` and run `python scripts/build_db.py`, or specify their location with `python scripts/build_db.py --source-dir "C:\path\to\LAB NO 4"`. The source directory should contain `Facilities\Facilities\facilities.shp`, `hotosm_mwi_roads_osm_shp\roads_lines.shp`, and `hotosm_mwi_waterways_osm_shp\waterways_lines.shp`.
 
@@ -100,6 +109,16 @@ A rebuild keeps the previous database as `dedza.sqlite.bak` and carries over the
 
 The **Health gap** sliders run a parameterized SQLite query against the stored nearest-facility distances. They update map coverage classes and district cell/area totals without rerunning the spatial distance calculation. Population summaries and Traditional Authority priorities remain the baseline 5 km / 8 km analysis.
 
-The **Priority weights** sliders (`/api/priority-scenario`) re-score every cell in a parameterized SQLite query with user-chosen weights for distance, lack of road access and lack of mapped waterways. Weights are normalised to sum to 100%, the served-cell multiplier follows the current Health gap served threshold, and the numbered top-12 markers and Priority cells table update. The default 55 / 25 / 20 reproduces the stored baseline exactly.
+The **Priority weights** sliders (`/api/priority-scenario`) re-score every cell in a parameterized SQLite query with user-chosen weights for the five criteria below. Weights are normalised to sum to 100%, the served-cell multiplier follows the current Health gap served threshold, and the numbered top-12 markers and Priority cells table update. The baseline weights and score scales are stored in the `meta` table, which the app reads; the default reproduces the stored ranking exactly.
 
-The baseline priority score is a screening heuristic, not a validated suitability model: distance contributes 55% (capped at 16 km and normalized to 8 km), road length contributes 25% (capped at 8 km), and mapped-waterway length contributes 20% (capped at 4 km); served cells receive a 0.35 multiplier. Road-access bands (4 km and 1.5 km) and waterway-length bands (2 km and 0.5 km) are also assumptions. Waterway length is only a mapped-waterway proxy, not water-point or borehole access. A build with no health facilities inside Dedza fails rather than treating missing distances as zero.
+The priority score is a screening heuristic for siting new facilities, not a validated suitability model. Each criterion is scaled 0–1 from the cell's calculated indicators:
+
+| Criterion | Indicator | Full score at | Baseline weight |
+|---|---|---|---|
+| Population | WorldPop 2030 projected residents | 75th percentile of cells | 30% |
+| Growth | Residents added 2025–2030 | 75th percentile of cells | 15% |
+| Distance | Straight-line distance to the nearest facility | 8 km (the unserved threshold) | 30% |
+| Road access | Share of 2025 residents within 2 km of a classified road (OSM trunk–tertiary) | 100% | 15% |
+| Flood safety | Share of the cell outside the 1-in-100-year flood zone and permanent water | 100% | 10% |
+
+Served cells receive a 0.35 multiplier. The recommendation actions are generated in SQL from each cell's own figures (distance band, residents added by 2030, road access below 50%, flood share of 5% or more). Each cell also stores the road travel time from its population-weighted centre to the nearest facility (walking to the nearest road at 5 km/h, then the quickest road route at indicative motorcycle speeds); it is shown alongside the score, not included in it. A build with no health facilities inside Dedza fails rather than treating missing distances as zero.

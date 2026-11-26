@@ -21,7 +21,12 @@ from rasterio.transform import Affine, from_bounds
 from rasterio.windows import Window, from_bounds as window_from_bounds
 from rasterio.warp import Resampling, reproject
 
+from shapely import STRtree
+from shapely.geometry import shape as shapely_shape
+
+from scripts.planning_analysis import FLOOD_DEPTH_PATH, PERMANENT_WATER_PATH, POPULATION_PATHS
 from scripts.site_constraints import point_in_geometry
+from scripts.site_suitability import SiteChecker
 
 ROOT = Path(__file__).resolve().parent
 RAW = ROOT / "data" / "raw"
@@ -31,13 +36,20 @@ SITE_CONSTRAINT_DB_PATH = ROOT / "data" / "processed" / "site_constraints.sqlite
 ENVIRONMENTAL_RASTER_PATHS = {
     "land_cover": ROOT / "data" / "processed" / "environmental" / "land_cover.tif",
     "slope": ROOT / "data" / "processed" / "environmental" / "slope.tif",
+    "flood": FLOOD_DEPTH_PATH,
 }
 STATIC = ROOT / "static"
 ADM2_PATH = RAW / "MWI_ADM2_simplified.geojson"
 # Traditional Authority boundaries: geoBoundaries gbHumanitarian (NSO Malawi / HDX, CC BY 3.0 IGO).
 # The earlier gbOpen ADM3 file carried other districts' TA names on Dedza's polygons.
 ADM3_PATH = RAW / "MWI_ADM3_humanitarian.geojson"
-WORLDPOP_PATH = RAW / "mwi_pop_2025_CN_100m_R2025A_v1.tif"
+WORLDPOP_PATH = POPULATION_PATHS[2025]
+WORLDPOP_2030_PATH = POPULATION_PATHS[2030]
+# OSM classes counted as classified roads for site road access (as in build_db.py).
+ACCESS_ROAD_CLASSES = (
+    "motorway", "trunk", "primary", "secondary", "tertiary",
+    "primary_link", "secondary_link", "tertiary_link",
+)
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 
@@ -49,19 +61,6 @@ _ROAD_NODE_INDEX: tuple[
     tuple[tuple[float, float], ...],
     np.ndarray,
 ] | None = None
-
-
-def road_distance_proxy_km(dist_km: float | int | None, road_km: float | int | None, water_km: float | int | None) -> float:
-    dist_km = float(dist_km or 0)
-    road_km = float(road_km or 0)
-    water_km = float(water_km or 0)
-    return dist_km + max(0, 5 - road_km) * 1.8 + max(0, 2 - water_km) * 1.2
-
-
-def road_access_score(dist_km: float | int | None, road_km: float | int | None, water_km: float | int | None) -> int:
-    travel_proxy_km = road_distance_proxy_km(dist_km, road_km, water_km)
-    score = 100 - travel_proxy_km * 6
-    return max(0, min(100, round(score)))
 
 
 class RouteNetworkUnavailable(Exception):
@@ -610,6 +609,15 @@ def site_layer_status() -> dict:
                 else "Land cover is not installed. Run python scripts/import_environmental_layers.py."
             ),
         },
+        "flood": {
+            "available": ENVIRONMENTAL_RASTER_PATHS["flood"].is_file(),
+            "message": (
+                "JRC Copernicus EMS GloFAS river flood hazard map v2.1: modelled water depth for a "
+                "1-in-100-year flood at about 90 m. A global model, not an official national flood map."
+                if ENVIRONMENTAL_RASTER_PATHS["flood"].is_file()
+                else "Flood hazard is not installed. Run python scripts/import_planning_layers.py."
+            ),
+        },
     }
     if SITE_CONSTRAINT_DB_PATH.is_file():
         with sqlite3.connect(SITE_CONSTRAINT_DB_PATH) as con:
@@ -700,18 +708,6 @@ def load_payloads() -> dict:
             if r["dist_facility_m"] is not None
             else None
         )
-        road_km = round(r["road_km"] or 0, 2)
-        water_km = round(r["water_km"] or 0, 2)
-        travel_proxy_km = (
-            round(road_distance_proxy_km(dist_km, road_km, water_km), 2)
-            if dist_km is not None
-            else None
-        )
-        road_score = (
-            road_access_score(dist_km, road_km, water_km)
-            if dist_km is not None
-            else None
-        )
         cells["features"].append(
             {
                 "type": "Feature",
@@ -720,14 +716,20 @@ def load_payloads() -> dict:
                     "area_km2": round(r["area_km2"] or 0, 3),
                     "coverage": r["coverage"],
                     "dist_km": dist_km,
-                    "road_km": road_km,
-                    "water_km": water_km,
+                    "road_km": round(r["road_km"] or 0, 2),
+                    "water_km": round(r["water_km"] or 0, 2),
                     "facilities_in_cell": r["facilities_in_cell"],
+                    "population_2020": round(r["population_2020"] or 0),
+                    "population": round(r["population"] or 0),
+                    "population_2030": round(r["population_2030"] or 0),
+                    "growth": round(r["growth"] or 0),
+                    "road_access_share": round(r["road_access_share"] or 0, 3),
+                    "flood_area_share": round(r["flood_area_share"] or 0, 3),
+                    "flood_pop_share": round(r["flood_pop_share"] or 0, 3),
+                    "travel_min": None if r["travel_min"] is None else round(r["travel_min"], 1),
                     "road_access": r["road_access"],
                     "water_access": r["water_access"],
                     "priority_score": round(r["priority_score"] or 0, 3),
-                    "road_access_score": road_score,
-                    "road_distance_proxy_km": travel_proxy_km,
                 },
                 "geometry": json.loads(r["geojson"]),
             }
@@ -792,6 +794,65 @@ def load_payloads() -> dict:
         "waterways": waterways,
         "recommendations": recs,
     }
+
+
+@lru_cache(maxsize=1)
+def site_checker() -> SiteChecker:
+    """Flood, road, slope and land-cover checks built from the stored layers."""
+    con = db()
+    try:
+        placeholders = ",".join("?" * len(ACCESS_ROAD_CLASSES))
+        roads = [
+            row[0]
+            for row in con.execute(
+                f"SELECT geojson FROM roads WHERE lower(highway) IN ({placeholders})",
+                ACCESS_ROAD_CLASSES,
+            )
+        ]
+    finally:
+        con.close()
+    return SiteChecker(
+        roads,
+        float(load_payloads()["meta"].get("road_access_km", 2)),
+        FLOOD_DEPTH_PATH,
+        PERMANENT_WATER_PATH,
+        ENVIRONMENTAL_RASTER_PATHS["slope"],
+        ENVIRONMENTAL_RASTER_PATHS["land_cover"],
+    )
+
+
+@lru_cache(maxsize=1)
+def settlement_planning() -> list[dict]:
+    """2030 population and site suitability for every settlement.
+
+    A settlement's 2030 population applies the WorldPop 2025-2030 growth of the
+    grid cell it lies in to its own 2025 estimate.
+    """
+    payloads = load_payloads()
+    cells = payloads["cells"]["features"]
+    polygons = [shapely_shape(feature["geometry"]) for feature in cells]
+    tree = STRtree(polygons)
+    meta = payloads["meta"]
+    district_ratio = float(meta.get("population_2030", 1)) / max(float(meta.get("population_2025", 1)), 1)
+    points = [(float(s["lon"]), float(s["lat"])) for s in payloads["settlements"]]
+    checks = site_checker().check_many(points)
+    result = []
+    for settlement, point, check in zip(payloads["settlements"], points, checks):
+        ratio = district_ratio
+        for index in tree.query(shapely_shape({"type": "Point", "coordinates": point}), predicate="within"):
+            props = cells[int(index)]["properties"]
+            if props["population"] > 0:
+                ratio = props["population_2030"] / props["population"]
+            break
+        population = float(settlement["population"] or 0)
+        result.append({
+            "population_2030": round(population * ratio, 1),
+            "site_suitable": check["suitable"],
+            "site_issues": [
+                f'{c["label"]}: {c["detail"]}' for c in check["checks"] if c["status"] in ("fail", "warn")
+            ],
+        })
+    return result
 
 
 @lru_cache(maxsize=1)
@@ -957,6 +1018,21 @@ def estimate_scenario_population(
         )
         population = source.read(1, window=window)
         transform = source.window_transform(window)
+        # WorldPop's 2030 projection resampled onto the same 100 m pixels.
+        population_2030 = np.full(population.shape, -1, dtype=np.float32)
+        with rasterio.open(WORLDPOP_2030_PATH) as source_2030:
+            reproject(
+                source=rasterio.band(source_2030, 1),
+                destination=population_2030,
+                src_transform=source_2030.transform,
+                src_crs=source_2030.crs,
+                src_nodata=source_2030.nodata,
+                dst_transform=transform,
+                dst_crs=source.crs,
+                dst_nodata=-1,
+                resampling=Resampling.nearest,
+            )
+        population_2030 = np.where(np.isfinite(population_2030) & (population_2030 >= 0), population_2030, 0)
         inside_district = geometry_mask(
             boundary_geometries,
             out_shape=population.shape,
@@ -1002,6 +1078,8 @@ def estimate_scenario_population(
             population[candidate_population_mask & existing_mask].sum(dtype=np.float64)
         )
         gained_population = float(population[gained_population_mask].sum(dtype=np.float64))
+        total_within_radius_2030 = float(population_2030[candidate_population_mask].sum(dtype=np.float64))
+        gained_population_2030 = float(population_2030[gained_population_mask].sum(dtype=np.float64))
         by_ta = []
         for index, feature in enumerate(ta_features, start=1):
             estimate = float(
@@ -1024,13 +1102,16 @@ def estimate_scenario_population(
         "population_within_radius": round(total_within_radius, 2),
         "already_within_existing_service_radius": round(previously_covered, 2),
         "additional_population_estimate": round(gained_population, 2),
+        "population_within_radius_2030": round(total_within_radius_2030, 2),
+        "additional_population_2030": round(gained_population_2030, 2),
         "by_traditional_authority": sorted(
             by_ta,
             key=lambda row: (-row["population_estimate"], row["name"]),
         ),
         "method": (
             "WorldPop 2025 100 m population pixels inside the candidate's straight-line radius, "
-            f"excluding pixels already inside an existing {'school' if facility_type == 'school' else 'baseline health-facility'} equal-radius zone."
+            f"excluding pixels already inside an existing {'school' if facility_type == 'school' else 'baseline health-facility'} equal-radius zone. "
+            "2030 figures use WorldPop's 2030 projection on the same pixels."
         ),
     }
 
@@ -1141,9 +1222,22 @@ def gap_analysis():
     )
 
 
-PRIORITY_BASELINE_WEIGHTS = {"distance": 55.0, "road": 25.0, "water": 20.0}
+PRIORITY_CRITERIA = ("population", "growth", "distance", "road", "flood")
 # Matches MIN_RANKED_CELL_KM2 in scripts/build_db.py: border slivers are not ranked.
 MIN_RANKED_CELL_KM2 = 1.0
+
+
+def priority_baseline() -> tuple[dict[str, float], dict[str, float]]:
+    """Baseline weights (percent) and score scales, as stored by scripts/build_db.py."""
+    meta = load_payloads()["meta"]
+    weights = {key: float(meta[f"weight_{key}"]) for key in PRIORITY_CRITERIA}
+    scales = {
+        "population_full": float(meta["population_full_score"]),
+        "growth_full": float(meta["growth_full_score"]),
+        "distance_full_m": float(meta["distance_full_m"]),
+        "served_multiplier": float(meta["served_multiplier"]),
+    }
+    return weights, scales
 
 
 @app.get("/api/priority-scenario")
@@ -1151,15 +1245,16 @@ def priority_scenario():
     """Re-score every grid cell in SQL with user-chosen criterion weights.
 
     Uses the same normalisation as the build-time score in scripts/build_db.py:
-    distance capped at 16 km and normalised to 8 km, road length capped at 8 km,
-    mapped-waterway length capped at 4 km, and a 0.35 multiplier for served cells.
-    Weights are normalised to sum to 1, so 55/25/20 reproduces the baseline.
+    WorldPop residents capped at the stored population_full_score, distance capped at 16 km and
+    normalised to 8 km, road length capped at 8 km, mapped-waterway length capped
+    at 4 km, and a 0.35 multiplier for served cells. Weights are normalised to
+    sum to 1, so the stored baseline weights (meta table) reproduce the baseline.
     """
+    baseline_weights, scales = priority_baseline()
     try:
         raw = {
-            "distance": float(request.args.get("w_distance", PRIORITY_BASELINE_WEIGHTS["distance"])),
-            "road": float(request.args.get("w_road", PRIORITY_BASELINE_WEIGHTS["road"])),
-            "water": float(request.args.get("w_water", PRIORITY_BASELINE_WEIGHTS["water"])),
+            key: float(request.args.get(f"w_{key}", baseline_weights[key]))
+            for key in PRIORITY_CRITERIA
         }
         served_km = float(request.args.get("served_km", 5))
     except (TypeError, ValueError):
@@ -1179,20 +1274,24 @@ def priority_scenario():
             """
             SELECT cell_id, area_km2,
                    ROUND((
-                       MIN(COALESCE(dist_facility_m, 16000) / 8000.0, 2.0) * :w_distance
-                       + (1 - MIN(road_km / 8.0, 1.0)) * :w_road
-                       + (1 - MIN(water_km / 4.0, 1.0)) * :w_water
+                       MIN(population_2030 / :pop_full, 1.0) * :w_population
+                       + MIN(MAX(growth, 0) / :growth_full, 1.0) * :w_growth
+                       + MIN(COALESCE(dist_facility_m, :dist_full) / :dist_full, 1.0) * :w_distance
+                       + road_access_share * :w_road
+                       + (1 - flood_area_share) * :w_flood
                    ) * CASE
                            WHEN dist_facility_m IS NOT NULL AND dist_facility_m <= :served_m
-                           THEN 0.35 ELSE 1.0
-                       END, 3) AS score
+                           THEN :served_multiplier ELSE 1.0
+                       END, 6) AS score
             FROM cells
             ORDER BY score DESC, cell_id DESC
             """,
             {
-                "w_distance": weights["distance"],
-                "w_road": weights["road"],
-                "w_water": weights["water"],
+                "pop_full": scales["population_full"],
+                "growth_full": scales["growth_full"],
+                "dist_full": scales["distance_full_m"],
+                "served_multiplier": scales["served_multiplier"],
+                **{f"w_{key}": value for key, value in weights.items()},
                 "served_m": served_km * 1000,
             },
         ).fetchall()
@@ -1202,6 +1301,8 @@ def priority_scenario():
     return jsonify(
         {
             "weights": {key: round(value * 100, 1) for key, value in weights.items()},
+            "baseline_weights": baseline_weights,
+            "scales": scales,
             "served_km": served_km,
             "min_ranked_cell_km2": MIN_RANKED_CELL_KM2,
             "top_cell_ids": [
@@ -1232,8 +1333,8 @@ def site_layers():
 @app.get("/api/environmental-tiles/<layer>/<int:z>/<int:x>/<int:y>.png")
 def environmental_tile(layer: str, z: int, x: int, y: int):
     if layer not in ENVIRONMENTAL_RASTER_PATHS:
-        return jsonify({"error": "Environmental layer must be land_cover or slope."}), 404
-    status_key = "land_cover" if layer == "land_cover" else "terrain"
+        return jsonify({"error": "Environmental layer must be land_cover, slope or flood."}), 404
+    status_key = {"land_cover": "land_cover", "slope": "terrain", "flood": "flood"}[layer]
     status = site_layer_status()[status_key]
     if not status["available"]:
         return jsonify({"error": status["message"]}), 404
@@ -1286,6 +1387,18 @@ def environmental_tile(layer: str, z: int, x: int, y: int):
             selected = valid & (pixels == value)
             rgba[:3, selected] = np.asarray(color, dtype=np.uint8)[:, None]
             rgba[3, selected] = 190
+    elif layer == "flood":
+        # Depth bands of the GloFAS categorised map: <1, 1-3, 3-10, >10 m.
+        depth_colors = (
+            (0, 1, (158, 202, 225)),
+            (1, 3, (66, 146, 198)),
+            (3, 10, (33, 102, 172)),
+            (10, math.inf, (8, 48, 107)),
+        )
+        for lower, upper, color in depth_colors:
+            selected = valid & (pixels > lower) & (pixels <= upper)
+            rgba[:3, selected] = np.asarray(color, dtype=np.uint8)[:, None]
+            rgba[3, selected] = 200
     else:
         slope_colors = (
             (0, 5, (65, 150, 88)),
@@ -1492,6 +1605,7 @@ def scenario_population():
         return jsonify({"error": str(error)}), 400
     except FileNotFoundError as error:
         return jsonify({"error": str(error)}), 503
+    estimate["site_suitability"] = site_checker().check(*coordinates)
     try:
         estimate["road_time_access"] = estimate_scenario_road_access(
             *coordinates,
@@ -1546,16 +1660,29 @@ def settlements():
                         "adm3_name": settlement["adm3_name"] or "",
                         "building_count": settlement.get("building_count"),
                         "source": settlement.get("source") or "OpenStreetMap",
+                        **planning,
                     },
                     "geometry": {
                         "type": "Point",
                         "coordinates": [settlement["lon"], settlement["lat"]],
                     },
                 }
-                for settlement in load_payloads()["settlements"]
+                for settlement, planning in zip(load_payloads()["settlements"], settlement_planning())
             ],
         }
     )
+
+
+@app.get("/api/site-check")
+def site_check():
+    """Flood, road, slope and land-cover checks for one point."""
+    try:
+        coordinates = (float(request.args["lon"]), float(request.args["lat"]))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "lon and lat must be numbers."}), 400
+    if valid_lon_lat(list(coordinates)) is None:
+        return jsonify({"error": "lon and lat must be a valid coordinate."}), 400
+    return jsonify(site_checker().check(*coordinates))
 
 
 @app.get("/api/cells")

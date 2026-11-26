@@ -80,7 +80,11 @@ def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypa
     monkeypatch.setattr(
         app_module,
         "ENVIRONMENTAL_RASTER_PATHS",
-        {"land_cover": raster_path, "slope": tmp_path / "missing-slope.tif"},
+        {
+            "land_cover": raster_path,
+            "slope": tmp_path / "missing-slope.tif",
+            "flood": tmp_path / "missing-flood.tif",
+        },
     )
     monkeypatch.setattr(
         app_module, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite"
@@ -89,7 +93,8 @@ def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypa
     status = client.get("/api/site-layers").get_json()
     assert status["land_cover"]["available"] is True
     assert status["terrain"]["available"] is False
-    assert set(status) == {"buildings", "terrain", "land_cover"}
+    assert status["flood"]["available"] is False
+    assert set(status) == {"buildings", "terrain", "land_cover", "flood"}
 
     response = client.get("/api/environmental-tiles/land_cover/0/0/0.png")
     assert response.status_code == 200
@@ -103,7 +108,11 @@ def test_environmental_tile_rejects_invalid_zoom(client, tmp_path, monkeypatch):
     monkeypatch.setattr(
         app_module,
         "ENVIRONMENTAL_RASTER_PATHS",
-        {"land_cover": raster_path, "slope": tmp_path / "missing-slope.tif"},
+        {
+            "land_cover": raster_path,
+            "slope": tmp_path / "missing-slope.tif",
+            "flood": tmp_path / "missing-flood.tif",
+        },
     )
 
     response = client.get("/api/environmental-tiles/land_cover/19/0/0.png")
@@ -238,7 +247,10 @@ def test_priority_scenario_default_weights_reproduce_baseline(client):
     finally:
         con.close()
 
-    assert payload["weights"] == {"distance": 55.0, "road": 25.0, "water": 20.0}
+    meta = load_payloads()["meta"]
+    expected = {key: float(meta[f"weight_{key}"]) for key in ("population", "growth", "distance", "road", "flood")}
+    assert payload["weights"] == pytest.approx(expected)
+    assert payload["baseline_weights"] == expected
     assert len(payload["cells"]) == len(stored)
     for cell in payload["cells"]:
         assert cell["score"] == pytest.approx(stored[cell["cell_id"]], abs=0.0006)
@@ -248,14 +260,15 @@ def test_priority_scenario_default_weights_reproduce_baseline(client):
 def test_priority_scenario_reweights_and_normalises(client):
     # Distance-only scoring: ranking must follow nearest-facility distance.
     payload = client.get(
-        "/api/priority-scenario?w_distance=40&w_road=0&w_water=0"
+        "/api/priority-scenario?w_population=0&w_growth=0&w_distance=40&w_road=0&w_flood=0"
     ).get_json()
-    assert payload["weights"] == {"distance": 100.0, "road": 0.0, "water": 0.0}
+    assert payload["weights"] == {"population": 0.0, "growth": 0.0, "distance": 100.0, "road": 0.0, "flood": 0.0}
+    dist_full = payload["scales"]["distance_full_m"]
 
     con = db()
     try:
         dist = {
-            row["cell_id"]: min((row["dist_facility_m"] or 16000) / 8000.0, 2.0)
+            row["cell_id"]: min((row["dist_facility_m"] or dist_full) / dist_full, 1.0)
             for row in con.execute("SELECT cell_id, dist_facility_m FROM cells")
         }
     finally:
@@ -264,10 +277,54 @@ def test_priority_scenario_reweights_and_normalises(client):
     assert all(dist[a] >= dist[b] for a, b in zip(top, top[1:]))
 
 
+def test_baseline_priority_cells_are_populated_places_beyond_5_km():
+    # Guards against ranking empty remote land (forest reserves, hills) first.
+    con = db()
+    try:
+        rows = con.execute(
+            """
+            SELECT c.population, c.dist_facility_m
+            FROM recommendations r JOIN cells c USING (cell_id)
+            """
+        ).fetchall()
+        total = con.execute("SELECT SUM(population) FROM cells").fetchone()[0]
+        district = con.execute(
+            """SELECT population_est FROM population_summary
+               WHERE area_name = 'Dedza District' AND coverage = 'total'"""
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert len(rows) == 12
+    assert all(row["population"] >= 1000 for row in rows)
+    assert all(row["dist_facility_m"] > 5000 for row in rows)
+    # Cell totals use the same pixel rules as the district zonal summary.
+    assert total == pytest.approx(district, rel=0.001)
+
+
+def test_population_weight_ranks_most_populated_cells_first(client):
+    payload = client.get(
+        "/api/priority-scenario?w_population=100&w_growth=0&w_distance=0&w_road=0&w_flood=0&served_km=50"
+    ).get_json()
+    full = payload["scales"]["population_full"]
+    con = db()
+    try:
+        population = {
+            row["cell_id"]: min(row["population_2030"] / full, 1.0)
+            for row in con.execute("SELECT cell_id, population_2030 FROM cells")
+        }
+    finally:
+        con.close()
+    top = payload["top_cell_ids"]
+    assert all(population[a] >= population[b] for a, b in zip(top, top[1:]))
+    assert all(population[cell_id] == 1.0 for cell_id in top)
+
+
 @pytest.mark.parametrize(
     ("query", "message"),
     [
-        ("w_distance=0&w_road=0&w_water=0", "At least one"),
+        ("w_population=0&w_growth=0&w_distance=0&w_road=0&w_flood=0", "At least one"),
+        ("w_population=101", "between 0 and 100"),
         ("w_distance=-5", "between 0 and 100"),
         ("w_road=abc", "must be numbers"),
         ("served_km=0", "served_km"),
@@ -433,13 +490,21 @@ def test_route_endpoint_returns_mapped_road_route(client):
 
 @pytest.mark.parametrize("facility_type", ["health", "school"])
 def test_scenario_population_endpoint_estimates_additional_population_by_ta(client, facility_type):
+    # A populated cell more than 5 km from every existing service of this type.
+    payloads = load_payloads()
+    services = payloads["schools"] if facility_type == "school" else payloads["facilities"]
     con = db()
     try:
-        site = con.execute(
-            "SELECT lon, lat FROM cells WHERE coverage = 'unserved' ORDER BY priority_score DESC LIMIT 1"
-        ).fetchone()
+        cells = con.execute("SELECT lon, lat FROM cells WHERE population > 1000").fetchall()
     finally:
         con.close()
+    site = max(
+        cells,
+        key=lambda cell: min(
+            haversine_km((cell["lon"], cell["lat"]), (service["lon"], service["lat"]))
+            for service in services
+        ),
+    )
 
     response = client.post(
         "/api/scenario-population",
@@ -625,3 +690,127 @@ def test_point_in_geometry_respects_polygon_holes():
     assert point_in_geometry((0.5, 0.5), geometry)
     assert not point_in_geometry((2, 2), geometry)
     assert point_in_geometry((1, 2), geometry)
+
+
+def test_cell_planning_indicators_are_calculated_from_the_rasters():
+    con = db()
+    try:
+        meta = dict(con.execute("SELECT key, value FROM meta").fetchall())
+        totals = con.execute(
+            "SELECT SUM(population_2020), SUM(population), SUM(population_2030) FROM cells"
+        ).fetchone()
+        bad_shares = con.execute(
+            """SELECT COUNT(*) FROM cells
+               WHERE road_access_share NOT BETWEEN 0 AND 1
+                  OR flood_area_share NOT BETWEEN 0 AND 1
+                  OR flood_pop_share NOT BETWEEN 0 AND 1"""
+        ).fetchone()[0]
+        growth_mismatch = con.execute(
+            "SELECT COUNT(*) FROM cells WHERE ABS(growth - (population_2030 - population)) > 0.01"
+        ).fetchone()[0]
+        flooded_cells = con.execute("SELECT COUNT(*) FROM cells WHERE flood_area_share > 0").fetchone()[0]
+        travel = con.execute(
+            "SELECT COUNT(*), SUM(travel_min IS NULL), MIN(travel_min) FROM cells WHERE population > 100"
+        ).fetchone()
+    finally:
+        con.close()
+
+    for year, total in zip((2020, 2025, 2030), totals):
+        assert total == pytest.approx(float(meta[f"population_{year}"]), rel=1e-6)
+    assert totals[0] < totals[1] < totals[2]  # Dedza's population is growing
+    assert bad_shares == 0
+    assert growth_mismatch == 0
+    assert flooded_cells > 0
+    assert travel[1] <= travel[0] * 0.05  # almost every populated cell has a road route
+    assert travel[2] >= 0
+
+
+def test_recommendation_actions_come_from_cell_indicators():
+    con = db()
+    try:
+        rows = con.execute(
+            """SELECT r.action, r.growth, c.flood_area_share
+               FROM recommendations r JOIN cells c USING (cell_id)"""
+        ).fetchall()
+    finally:
+        con.close()
+    for row in rows:
+        if row["growth"] >= 1:
+            assert f"{round(row['growth']):,} more residents by 2030" in row["action"]
+        if row["flood_area_share"] >= 0.05:
+            assert "1-in-100-year flood zone" in row["action"]
+        else:
+            assert "flood zone" not in row["action"]
+
+
+def _flooded_point():
+    import rasterio as rio
+
+    with rio.open(app_module.FLOOD_DEPTH_PATH) as source:
+        depth = source.read(1)
+        rows, cols = np.nonzero((depth > 1) & (depth != source.nodata))
+        boundary = load_payloads()["boundary"]["features"][0]["geometry"]
+        for row, col in zip(rows, cols):
+            lon, lat = source.xy(row, col)
+            if point_in_geometry((lon, lat), boundary):
+                return lon, lat
+    raise AssertionError("no flooded pixel inside Dedza")
+
+
+def test_site_check_fails_inside_the_flood_zone(client):
+    lon, lat = _flooded_point()
+    result = client.get(f"/api/site-check?lon={lon}&lat={lat}").get_json()
+    flood = next(check for check in result["checks"] if check["key"] == "flood")
+    assert flood["status"] == "fail"
+    assert flood["value"] > 1
+    assert result["suitable"] is False
+    assert result["rules"]["road_access_km"] == pytest.approx(
+        float(load_payloads()["meta"]["road_access_km"])
+    )
+
+
+def test_site_check_reports_distance_to_nearest_classified_road(client):
+    response = client.get("/api/site-check?lon=34.3242&lat=-14.3778")
+    assert response.status_code == 200
+    road = next(check for check in response.get_json()["checks"] if check["key"] == "road")
+    assert road["status"] in {"pass", "warn", "fail"}
+    assert road["value"] >= 0
+    assert client.get("/api/site-check?lon=abc&lat=1").status_code == 400
+
+
+def test_scenario_population_reports_2030_reach_and_site_checks(client):
+    con = db()
+    try:
+        site = con.execute(
+            "SELECT lon, lat FROM cells WHERE coverage = 'unserved' ORDER BY population DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        con.close()
+    result = client.post(
+        "/api/scenario-population",
+        json={"coordinates": [site["lon"], site["lat"]], "type": "health", "radius_km": 5},
+    ).get_json()
+    assert result["additional_population_2030"] > result["additional_population_estimate"] > 0
+    assert result["population_within_radius_2030"] >= result["additional_population_2030"]
+    assert {check["key"] for check in result["site_suitability"]["checks"]} == {
+        "flood", "road", "slope", "land_cover",
+    }
+
+
+def test_settlements_carry_2030_population_and_site_suitability(client):
+    features = client.get("/api/settlements").get_json()["features"]
+    assert features
+    props = [feature["properties"] for feature in features]
+    assert all("site_suitable" in p and "population_2030" in p for p in props)
+    assert any(p["site_suitable"] is False for p in props)
+    assert all(not p["site_suitable"] or not any(
+        issue.startswith("Flood risk: Inside") for issue in p["site_issues"]
+    ) for p in props)
+    grown = [p for p in props if (p["population"] or 0) > 100]
+    assert all(p["population_2030"] >= p["population"] for p in grown)
+
+
+def test_flood_tiles_render(client):
+    response = client.get("/api/environmental-tiles/flood/9/304/277.png")
+    assert response.status_code == 200
+    assert response.data.startswith(b"\x89PNG\r\n\x1a\n")
