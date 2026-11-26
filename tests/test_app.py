@@ -363,7 +363,7 @@ def test_route_estimate_returns_distance_time_and_alternative_choices(monkeypatc
     projected = {node: project_road_node(node) for node in graph}
     monkeypatch.setattr(
         "app.load_road_network",
-        lambda: (graph, coordinates, projected),
+        lambda *_args, **_kwargs: (graph, coordinates, projected),
     )
 
     result = calculate_road_route(start, target)
@@ -435,7 +435,7 @@ def test_scenario_road_access_compares_candidate_with_existing_service(monkeypat
     }
     projected = {node: project_road_node(node) for node in graph}
     monkeypatch.setattr("app.load_payloads", lambda: payloads)
-    monkeypatch.setattr("app.load_road_network", lambda: (graph, {node: node for node in graph}, projected))
+    monkeypatch.setattr("app.load_road_network", lambda *_args, **_kwargs: (graph, {node: node for node in graph}, projected))
     monkeypatch.setattr(
         "app.nearest_road_node",
         lambda point, _projected: node_by_point[point],
@@ -814,3 +814,148 @@ def test_flood_tiles_render(client):
     response = client.get("/api/environmental-tiles/flood/9/304/277.png")
     assert response.status_code == 200
     assert response.data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_cell_distance_is_walking_distance_and_never_shorter_than_straight_line():
+    con = db()
+    try:
+        rows = con.execute("SELECT dist_facility_m, straight_dist_m FROM cells").fetchall()
+        meta = dict(con.execute("SELECT key, value FROM meta").fetchall())
+    finally:
+        con.close()
+    assert all(row["dist_facility_m"] >= row["straight_dist_m"] - 1 for row in rows)
+    longer = sum(row["dist_facility_m"] > row["straight_dist_m"] * 1.05 for row in rows)
+    assert longer > len(rows) / 2  # paths wind, so most cells are noticeably farther on foot
+    assert meta["distance_method"].startswith("walking network distance")
+
+
+def test_road_network_modes_and_shortest_costs():
+    from scripts.road_network import NodeIndex, build_graph, shortest_costs
+
+    line = lambda *coords: json.dumps({"type": "LineString", "coordinates": [list(c) for c in coords]})
+    rows = [
+        ("primary", "", line((34.0, -14.0), (34.01, -14.0))),
+        ("path", "", line((34.01, -14.0), (34.02, -14.0))),
+        ("residential", "yes", line((34.02, -14.0), (34.03, -14.0))),
+    ]
+    walking = build_graph(rows, "walking")
+    vehicle = build_graph(rows, "vehicle")
+    assert (34.02, -14.0) in walking and (34.015, -14.0) not in vehicle
+    assert all(edge[0] != (34.02, -14.0) for edge in vehicle.get((34.01, -14.0), []))  # no path for vehicles
+    assert vehicle[(34.03, -14.0)] == []  # one-way street
+    assert any(edge[0] == (34.02, -14.0) for edge in walking[(34.03, -14.0)])  # walking ignores one-way
+
+    costs, origin = shortest_costs(walking, {(34.0, -14.0): 0.5}, labels={(34.0, -14.0): 7})
+    assert costs[(34.03, -14.0)] == pytest.approx(0.5 + 3 * haversine_km((34.0, -14.0), (34.01, -14.0)), rel=1e-3)
+    assert origin[(34.03, -14.0)] == 7
+    within, _ = shortest_costs(walking, {(34.0, -14.0): 0.0}, limit=1.5)
+    assert (34.01, -14.0) in within and (34.03, -14.0) not in within
+
+    index = NodeIndex(walking)
+    nearest, distance = index.nearest_points(np.array([34.011, 34.029]), np.array([-14.0, -14.0]))
+    assert [index.nodes[i] for i in nearest] == [(34.01, -14.0), (34.03, -14.0)]
+    assert distance[0] == pytest.approx(0.108, abs=0.002)
+
+    # A capped search leaves points with no node within max_km unmatched.
+    far, far_distance = index.nearest_points(np.array([34.011, 34.2]), np.array([-14.0, -14.0]), max_km=1.0)
+    assert index.nodes[far[0]] == (34.01, -14.0) and far[1] == -1 and np.isinf(far_distance[1])
+
+
+def test_candidate_walking_reach_area_matches_population_rule(client):
+    from shapely.geometry import Point, shape
+
+    lon, lat = 34.33, -14.38
+    estimate = client.post(
+        "/api/scenario-population", json={"coordinates": [lon, lat], "type": "health", "radius_km": 5}
+    ).get_json()
+    area = shape(estimate["walking_reach_geojson"])
+    assert area.is_valid and area.contains(Point(lon, lat))
+    # Walking reach is never larger than the straight-line circle of the same radius.
+    area_km2 = area.area * 110.574 * 111.320 * np.cos(np.radians(lat))
+    assert 0 < area_km2 < np.pi * 5 ** 2
+    # Every reached settlement lies in (or on the sampled edge of) the drawn area.
+    settlements = load_payloads()["settlements"]
+    for row in estimate["reached_settlements"]:
+        point = Point(float(settlements[row["index"]]["lon"]), float(settlements[row["index"]]["lat"]))
+        assert area.buffer(0.003).contains(point)
+
+
+def test_health_walking_area_matches_served_cells(client):
+    from shapely.geometry import shape
+
+    response = client.get("/api/health-walking-area")
+    assert response.status_code == 200
+    feature = response.get_json()
+    area = shape(feature["geometry"])
+    assert feature["properties"]["limit_km"] == 5.0 and area.is_valid
+    area_km2 = area.area * 110.574 * 111.320 * np.cos(np.radians(-14.3))
+    con = db()
+    try:
+        served_km2, district_km2 = con.execute(
+            "SELECT SUM(CASE WHEN coverage = 'served' THEN area_km2 ELSE 0 END), SUM(area_km2) FROM cells"
+        ).fetchone()
+    finally:
+        con.close()
+    # Measured from cell population centres vs. every 250 m location: close, not identical.
+    assert area_km2 < district_km2
+    assert abs(area_km2 - served_km2) / district_km2 < 0.1
+
+
+def test_walking_route_uses_paths_at_walking_speed(client):
+    payloads = load_payloads()
+    settlement = next(row for row in payloads["settlements"] if row["name"] == "Abrahamu")
+    facility = next(row for row in payloads["facilities"] if row["name"] == "Bembeke Health Centre")
+    body = {"origin": [settlement["lon"], settlement["lat"]], "destination": [facility["lon"], facility["lat"]]}
+    walking = client.post("/api/route", json={**body, "mode": "walking"}).get_json()
+    vehicle = client.post("/api/route", json={**body, "mode": "vehicle"}).get_json()
+    assert walking["mode"] == "walking" and vehicle["mode"] == "vehicle"
+    assert walking["estimated_network_time_min"] == pytest.approx(walking["network_distance_km"] / 5 * 60, rel=1e-6)
+    assert walking["network_distance_km"] <= vehicle["network_distance_km"] + 1e-6  # footpaths can only shorten it
+    assert walking["estimated_network_time_min"] > vehicle["estimated_network_time_min"]
+    assert client.post("/api/route", json={**body, "mode": "bicycle"}).status_code == 400
+
+
+def test_settlement_walking_distance_to_nearest_service(client):
+    import app as application
+
+    features = client.get("/api/settlements").get_json()["features"]
+    health_sites = application.service_sites("health")
+    schools = load_payloads()["schools"]
+    checked = 0
+    for feature in features[:200]:
+        p = feature["properties"]
+        if p["walk_km_health"] is None:
+            continue
+        point = tuple(feature["geometry"]["coordinates"])
+        straight = min(haversine_km(point, (s["lon"], s["lat"])) for s in health_sites)
+        assert p["walk_km_health"] >= straight - 0.05
+        school = schools[p["nearest_school_index"]]
+        assert p["walk_km_school"] >= haversine_km(point, (school["lon"], school["lat"])) - 0.05
+        checked += 1
+    assert checked > 150
+
+
+def test_suggest_sites_maximises_walking_reach(client):
+    response = client.post("/api/suggest-sites", json={"type": "health", "radius_km": 5})
+    assert response.status_code == 200
+    picks = response.get_json()["picks"]
+    assert 1 <= len(picks) <= 3
+    gains = [pick["people"] for pick in picks]
+    assert gains == sorted(gains, reverse=True) and gains[0] > 0
+    planning = {i: row for i, row in enumerate(client.get("/api/settlements").get_json()["features"])}
+    for pick in picks:
+        assert planning[pick["index"]]["properties"]["site_suitable"] is True
+    # The top pick's reach matches an independent walking estimate from that site.
+    top = picks[0]
+    estimate = client.post(
+        "/api/scenario-population", json={"coordinates": top["coordinates"], "type": "health", "radius_km": 5}
+    ).get_json()
+    assert len(estimate["reached_settlements"]) >= top["settlement_count"]
+    assert all(row["walk_km"] <= 5 for row in estimate["reached_settlements"])
+
+    excluded = client.post(
+        "/api/suggest-sites", json={"type": "health", "radius_km": 5, "exclude": [top["coordinates"]]}
+    ).get_json()["picks"]
+    assert top["index"] not in [pick["index"] for pick in excluded]
+    assert client.post("/api/suggest-sites", json={"type": "health", "radius_km": 5, "area": "Nowhere"}).status_code == 400
+    assert client.post("/api/suggest-sites", json={"type": "clinic", "radius_km": 5}).status_code == 400

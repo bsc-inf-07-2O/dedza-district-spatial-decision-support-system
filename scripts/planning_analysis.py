@@ -8,13 +8,14 @@ Used by scripts/build_db.py. Every indicator is calculated from data:
   road, OSM trunk to tertiary (buffer built in DuckDB Spatial SQL, see build_db.py);
 * flood exposure - share of the cell's area and of its residents inside the
   JRC GloFAS 1-in-100-year river flood extent or permanent water;
-* travel time to care - walking from the cell's population centre to the nearest
-  road, then the quickest road route (motorcycle speeds) to the nearest facility.
+* walking distance to care - from the cell's population centre along roads,
+  tracks and paths to the nearest facility (scripts/road_network.py);
+* vehicle travel time to care - walk to the nearest road, then the quickest road
+  route at indicative motorcycle speeds.
 """
 
 from __future__ import annotations
 
-import heapq
 import json
 from pathlib import Path
 
@@ -23,6 +24,15 @@ import rasterio
 from rasterio.features import geometry_mask, rasterize
 from rasterio.mask import mask
 from rasterio.warp import Resampling, reproject
+
+from scripts.road_network import (
+    WALKING_SPEED_KMH,
+    NodeIndex,
+    build_graph,
+    fetch_road_rows,
+    reverse_graph,
+    shortest_costs,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
@@ -36,7 +46,6 @@ PERMANENT_WATER_PATH = RAW / "dedza_permanent_water.tif"
 PLANNING_LAYER_PATHS = [*POPULATION_PATHS.values(), FLOOD_DEPTH_PATH, PERMANENT_WATER_PATH]
 
 ROAD_ACCESS_KM = 2.0
-WALKING_SPEED_KMH = 5.0
 MAX_TRAVEL_MIN = 24 * 60
 
 
@@ -129,43 +138,47 @@ def cell_indicators(grids: dict, cells: list[tuple[int, str]], road_buffer: dict
     return result
 
 
-def travel_minutes_to_care(
+def network_access(
     origins: dict[int, tuple[float, float]],
     facilities: list[tuple[float, float]],
-) -> dict[int, float | None]:
-    """Walk to the nearest road node, then the quickest road route to any facility.
+    route_db: Path,
+) -> dict[int, dict[str, float | None]]:
+    """Walking distance and vehicle travel time from each origin to the nearest facility.
 
-    Uses the same road graph and motorcycle speeds as the app's routing. Facility
-    walking connectors are included as start offsets of a multi-source Dijkstra
-    on the reversed graph, so every node gets its time to the nearest facility.
+    * walk_km: straight walk to the nearest node of the walking network (roads,
+      tracks and paths), then the shortest walking route to a facility.
+    * vehicle_min: walk to the nearest road at 5 km/h, then the quickest road
+      route at indicative motorcycle speeds.
+    Facility connectors (facility to its nearest node) are start offsets of a
+    multi-source Dijkstra, so every node gets its cost to the nearest facility.
     """
-    from app import haversine_km, load_road_network, nearest_road_node, reverse_road_graph
+    rows = fetch_road_rows(route_db)
+    walk_min = lambda km: km / WALKING_SPEED_KMH * 60  # noqa: E731
+    result: dict[int, dict[str, float | None]] = {cell_id: {} for cell_id in origins}
 
-    graph, _, projected = load_road_network()
-    walk = lambda km: km / WALKING_SPEED_KMH * 60  # noqa: E731
-    start_times: dict[tuple[float, float], float] = {}
+    walking = build_graph(rows, "walking")
+    walking_index = NodeIndex(walking)
+    starts: dict[tuple[float, float], float] = {}
     for point in facilities:
-        node = nearest_road_node(point, projected)
-        offset = walk(haversine_km(point, node))
-        start_times[node] = min(offset, start_times.get(node, float("inf")))
-
-    reversed_graph = reverse_road_graph(graph)
-    times = dict(start_times)
-    queue = [(time, node) for node, time in times.items()]
-    heapq.heapify(queue)
-    while queue:
-        time_so_far, current = heapq.heappop(queue)
-        if time_so_far > times.get(current, float("inf")):
-            continue
-        for neighbor, _, time_min in reversed_graph.get(current, ()):
-            candidate = time_so_far + time_min
-            if candidate < times.get(neighbor, float("inf")) and candidate <= MAX_TRAVEL_MIN:
-                times[neighbor] = candidate
-                heapq.heappush(queue, (candidate, neighbor))
-
-    result: dict[int, float | None] = {}
+        node, snap = walking_index.nearest(point)
+        starts[node] = min(snap, starts.get(node, float("inf")))
+    distances, _ = shortest_costs(walking, starts, weight="km")
     for cell_id, point in origins.items():
-        node = nearest_road_node(point, projected)
-        road_time = times.get(node)
-        result[cell_id] = None if road_time is None else walk(haversine_km(point, node)) + road_time
+        node, snap = walking_index.nearest(point)
+        reached = distances.get(node)
+        result[cell_id]["walk_km"] = None if reached is None else reached + snap
+    del walking, walking_index, distances
+
+    vehicle = build_graph(rows, "vehicle")
+    vehicle_index = NodeIndex(vehicle)
+    starts = {}
+    for point in facilities:
+        node, snap = vehicle_index.nearest(point)
+        starts[node] = min(walk_min(snap), starts.get(node, float("inf")))
+    # Times *to* a facility: search the reversed (one-way aware) graph.
+    times, _ = shortest_costs(reverse_graph(vehicle), starts, weight="min", limit=MAX_TRAVEL_MIN)
+    for cell_id, point in origins.items():
+        node, snap = vehicle_index.nearest(point)
+        reached = times.get(node)
+        result[cell_id]["vehicle_min"] = None if reached is None else reached + walk_min(snap)
     return result

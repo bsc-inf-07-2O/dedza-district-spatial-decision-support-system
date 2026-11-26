@@ -497,7 +497,7 @@ label { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 
 .swatch.settlement-in { background: #8bd4c4; border: 2px solid #174b43; border-radius: 50%; }
 .swatch.settlement-out { background: #e76f51; border: 2px solid #7b2c25; border-radius: 50%; }
 .swatch.scenario-site { background: transparent; border: 2px dashed #e76f51; border-radius: 50%; }
-.swatch.buffer-ring { background: transparent; border: 2px dashed #2a9d8f; border-radius: 50%; }
+.swatch.buffer-ring { background: rgba(42, 157, 143, 0.12); border: 2px dashed #2a9d8f; border-radius: 3px; }
 .swatch.building { background: #c77dff; border: 1px solid #7b2cbf; border-radius: 2px; }
 .swatch.flood-zone { background: linear-gradient(90deg, #9ecae1, #08306b); }
 .swatch.road { background: #cfcfcf; }
@@ -1663,3 +1663,105 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .deck-resizer { top: -8px; height: 16px; }
 }
 .topbar .custom-select-trigger { min-height: 34px; padding: 4px 12px; font-size: 13px; }
+
+/* Route comparison card: own Hide / Clear buttons, kept clear of the tool panel */
+.map-route-results { z-index: 900; }
+.map-route-results h2 { position: static; margin: 0; padding: 0; border: 0; background: none; font-size: 12px; }
+.route-results-header {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -10px -10px 8px;
+  padding: 7px 8px 7px 12px;
+  border-radius: 12px 12px 0 0;
+  background: var(--results-panel-header);
+  color: #fff;
+}
+.route-results-buttons { display: flex; gap: 6px; }
+.route-results-buttons button {
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  background: transparent;
+  color: #fff;
+  font: 600 11.5px var(--font-ui);
+  cursor: pointer;
+}
+.route-results-buttons button:hover { background: rgba(255, 255, 255, 0.14); }
+.route-results-buttons button:focus-visible { outline: none; box-shadow: var(--ring); }
+.map-route-results.collapsed { overflow: hidden; }
+.map-route-results.collapsed #route-results-body { display: none; }
+.map-route-results.collapsed .route-results-header { margin-bottom: -10px; border-radius: 12px; }
+@media (min-width: 901px) {
+  /* Open tool panel: 360 px wide, 12 px from the map edge. */
+  body.tool-open .map-route-results { left: 384px; width: min(370px, calc(100% - 396px)); }
+}
+@media (max-width: 900px) {
+  .panel.tool-panel { z-index: 1200; }
+}
+
+/* Rounded controls: buttons and single-line inputs share the pill shape of the
+   Insights toggle. Checkboxes, sliders, list rows and section headers keep
+   their own shapes. */
+:root { --pill: 999px; }
+button:not(.section-toggle):not(.custom-select-option):not(.tool-button),
+.custom-select-trigger,
+.custom-select-search input,
+.panel input[type="number"],
+.panel input[type="text"],
+.panel input[type="search"],
+.panel select {
+  border-radius: var(--pill);
+}
+.panel input[type="number"], .custom-select-trigger { padding-left: 14px; }
+/* Steppers sit inside the pill input, so they are rounded to match. */
+.number-stepper { top: 4px; right: 5px; bottom: 4px; }
+.number-stepper-button { border-radius: var(--pill); }
+/* Tool rail tiles hold an icon and a label, so a full pill would distort them. */
+.tool-button { border-radius: 18px; }
+/* Analysis tabs become pills instead of folder tabs. */
+.analysis-tabs { padding-bottom: 6px; }
+.analysis-tab { margin-bottom: 0; border-bottom: 0; }
+.analysis-tab.active { background: rgba(244, 197, 66, 0.16); color: var(--accent); }
+/* Map zoom control: a pill to match, moved clear of an open tool panel. */
+.leaflet-bar { border-radius: var(--pill); overflow: hidden; }
+.leaflet-bar a, .leaflet-bar a:first-child, .leaflet-bar a:last-child { border-radius: 0; }
+@media (min-width: 901px) {
+  body.tool-open .leaflet-top.leaflet-left { left: 372px; }
+}
+
+/* TA search box matches the District button beside it: same 8px corners,
+   translucent fill and border, instead of the global pill shape. */
+.area-control .ta-control button.custom-select-trigger {
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  font-weight: 600;
+}
+.area-control .ta-control button.custom-select-trigger.is-placeholder { color: var(--ink); }
+.area-control .ta-control button.custom-select-trigger:hover:not(:disabled) { border-color: var(--accent); background: rgba(244, 197, 66, 0.14); box-shadow: none; }
+.area-control .ta-control .custom-select.is-open button.custom-select-trigger { border-color: var(--accent); }
+/* Empty TA box reads as a search field: magnifier icon and softer prompt text. */
+.area-control .ta-control button.custom-select-trigger.is-placeholder { color: #fff; font-weight: 600; }
+.area-control .ta-control button.custom-select-trigger.is-placeholder::before {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  background: currentColor;
+  content: "";
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.area-control .ta-control button.custom-select-trigger.is-placeholder .custom-select-value { flex: 1 1 auto; }
+
+/* Map pop-up action buttons keep the rounded pill shape. */
+.leaflet-popup .popup-actions button.popup-action,
+.leaflet-popup .leaflet-popup-content button { border-radius: 999px; }

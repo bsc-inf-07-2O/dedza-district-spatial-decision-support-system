@@ -25,7 +25,7 @@
       <label for="ta-select">Traditional Authority</label>
       <div class="ta-control">
         <select id="ta-select" data-searchable>
-          <option value="" data-meta="All Traditional Authorities in Dedza">Whole district</option>
+          <option value="" data-meta="All Traditional Authorities in Dedza" data-trigger-label="Search Traditional Authority...">Whole district</option>
         </select>
         <button type="button" id="clear-ta" aria-pressed="true" title="Show the whole district">District</button>
       </div>
@@ -63,7 +63,7 @@
       <div class="tool-view" data-tool-view="gap" data-title="Health gap" hidden>
         <section class="gap-analysis-control" aria-labelledby="gap-analysis-title">
           <h2 id="gap-analysis-title">Health gap</h2>
-          <p class="control-hint">Set the distance your plan treats as "served" (Malawi's standard is 5 km) and see how many areas and people fall short. The map and priority ranking update at once; population and TA summaries stay at the 5 / 8 km baseline.</p>
+          <p class="control-hint">Set the walking distance your plan treats as "served" (Malawi's standard is 5 km), measured along roads and footpaths, and see how many areas and people fall short. The map and priority ranking update at once; population and TA summaries stay at the 5 / 8 km baseline.</p>
           <label for="gap-served-km">Served at or below <output id="gap-served-value" for="gap-served-km">5 km</output></label>
           <input id="gap-served-km" type="range" min="3" max="19" step="1" value="5" />
           <label for="gap-underserved-km">Underserved up to <output id="gap-underserved-value" for="gap-underserved-km">8 km</output></label>
@@ -99,9 +99,9 @@
             <option value="health" data-meta="Compared with baseline health facilities" selected>Health centre</option>
             <option value="school" data-meta="Compared with existing schools">School</option>
           </select>
-          <label for="scenario-radius">Access radius (km)</label>
+          <label for="scenario-radius">Walking distance (km)</label>
           <input id="scenario-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="scenario-help" />
-          <p class="control-hint" id="scenario-help">Choose a facility type and radius, then let the system suggest the best sites or add your own candidates; sites are ranked by people newly brought within reach. Compare separate signals: WorldPop population within the straight-line radius, settlements newly within 30- and 60-minute road-time bands versus existing same-type services, and the affected TAs. Road times use indicative motorcycle speeds and exclude connector time, traffic and road conditions. Facility capacity data is unavailable and is not scored. Each candidate is assessed independently; field verification is needed.</p>
+          <p class="control-hint" id="scenario-help">Choose a facility type and radius, then let the system suggest the best sites or add your own candidates; sites are ranked by people newly brought within walking reach. Compare separate signals: WorldPop population within the radius as walking distance along roads and footpaths, settlements newly within 30- and 60-minute motorcycle road-time bands versus existing same-type services, and the affected TAs. Road times use indicative motorcycle speeds and exclude connector time, traffic and road conditions. Facility capacity data is unavailable and is not scored. Each candidate is assessed independently; field verification is needed.</p>
           <div class="scenario-actions">
             <button type="button" id="suggest-sites" class="primary-action" data-icon="spark" title="Find the 3 locations that would bring the most currently unserved people within the access radius">Suggest best sites</button>
             <button type="button" id="place-scenario" data-icon="pin" title="Then click the map, or use Add candidate site here in any cell popup">Add site on map</button>
@@ -113,8 +113,13 @@
       <div class="tool-view" data-tool-view="routes" data-title="Routes" hidden>
         <section class="route-control">
           <h2>Road route estimate</h2>
-          <p class="control-hint">Compare the shortest-distance route, quickest estimated route, and another alternative where available. Tip: click a settlement or facility on the map and use <strong>Route from here</strong> / <strong>Route to here</strong>.</p>
-          <label for="route-settlement">From settlement</label>
+          <p class="control-hint">Walking follows roads, tracks and footpaths at 5 km/h; motorcycle / ambulance uses roads only at indicative speeds and compares the shortest and quickest routes. Tip: click a settlement or facility on the map and use <strong>Route from here</strong> / <strong>Route to here</strong>.</p>
+          <label for="route-mode">Travel mode</label>
+      <select id="route-mode">
+        <option value="walking" data-meta="Roads, tracks and footpaths at 5 km/h" selected>Walking</option>
+        <option value="vehicle" data-meta="Roads only, indicative motorcycle speeds">Motorcycle / ambulance</option>
+      </select>
+      <label for="route-settlement">From settlement</label>
           <select id="route-settlement">
             <option value="" data-placeholder>Select a settlement</option>
           </select>
@@ -132,7 +137,7 @@
       <div class="tool-view" data-tool-view="schools" data-title="Schools" hidden>
         <section class="school-access-control">
           <h2>School access radius</h2>
-          <label for="school-radius">Maximum straight-line distance (km)</label>
+          <label for="school-radius">Maximum walking distance (km)</label>
           <input id="school-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="school-radius-help" />
           <p class="control-hint" id="school-radius-help">After changing the value, click elsewhere to update. Counts update and settlement dots show which are within or beyond this distance; no school-radius circles are drawn. Turn on the Settlements map layer to see the dots.</p>
           <p class="area-status" id="school-access-status" role="status"></p>
@@ -150,7 +155,7 @@
           <label><input type="checkbox" id="lyr-registry" /> Health facilities · MHFR registry</label>
           <label><input type="checkbox" id="lyr-schools" /> Schools</label>
           <label><input type="checkbox" id="lyr-settlements" /> Settlements</label>
-          <label><input type="checkbox" id="lyr-buffers" /> 5 km coverage rings</label>
+          <label><input type="checkbox" id="lyr-buffers" /> 5 km walking access area</label>
           <label><input type="checkbox" id="lyr-roads" /> Roads</label>
           <label><input type="checkbox" id="lyr-water" /> Mapped waterways</label>
           <label><input type="checkbox" id="lyr-priority" checked /> Priority screening cells</label>
@@ -197,7 +202,14 @@
         <button type="button" id="close-scenario-notice" aria-label="Dismiss notification">×</button>
       </div>
       <section id="route-results-panel" class="map-route-results" aria-labelledby="route-results-title" hidden>
-        <h2 id="route-results-title">Route comparison</h2>
+        <header class="route-results-header">
+          <h2 id="route-results-title">Route comparison</h2>
+          <div class="route-results-buttons">
+            <button type="button" id="toggle-route-results" aria-expanded="true" aria-controls="route-results-body" title="Minimise the route comparison">Hide</button>
+            <button type="button" id="close-route-results" aria-label="Clear the route from the map" title="Clear the route from the map">Clear</button>
+          </div>
+        </header>
+        <div id="route-results-body">
         <div id="route-options" class="route-options" role="group" aria-label="Available route choices"></div>
         <div class="route-map-metrics" aria-label="Selected route metrics">
           <div><span>Mapped-road distance</span><strong id="route-road-distance">—</strong></div>
@@ -206,6 +218,7 @@
           <div><span>Straight-line access</span><strong id="route-connectors">—</strong></div>
         </div>
         <p id="route-status" class="map-route-status" role="status" aria-live="polite">Choose a settlement and facility to estimate a route.</p>
+        </div>
       </section>
       <section id="scenario-results" class="scenario-results map-scenario-results" aria-labelledby="scenario-results-title" hidden>
         <header class="scenario-results-header">
@@ -263,10 +276,10 @@
         <details class="briefing-methods">
           <summary>Methods, sources and limitations</summary>
           <ul>
-            <li>Baseline health access uses the original MOH facility dataset and a 3 km analysis grid: served at 5 km or less, underserved at 5–8 km, and unserved beyond 8 km. Distances also count MOH facilities in neighbouring districts within 20 km of the boundary, so border cells are not penalised; only Dedza facilities are drawn on the map.</li>
+            <li>Baseline health access uses the original MOH facility dataset and a 3 km analysis grid. Distance is the walking distance from each cell's population centre along OpenStreetMap roads, tracks and footpaths (a straight walk to the nearest path, then the shortest route): served at 5 km or less, underserved at 5–8 km, and unserved beyond 8 km. Distances also count MOH facilities in neighbouring districts within 20 km of the boundary, so border cells are not penalised; only Dedza facilities are drawn on the map.</li>
             <li id="method-priority">The priority score weights WorldPop 2025 residents per cell, distance to the nearest facility, lack of road access and lack of mapped waterways (adjustable under Priority weights). Served cells are down-weighted, and border slivers under 1 km² are scored but not ranked.</li>
             <li>WorldPop 2025 100 m estimates are summed into those baseline health-grid classes; they are modelled population estimates, not a census or school-access measure.</li>
-            <li>Settlements are the <span id="method-settlement-count">mapped</span> GRID3 v3.0 built-up and small settlement areas (50+ buildings, CIESIN 2024); hamlets are excluded. Each has a WorldPop 2025 population estimate summed inside its extent, and a name borrowed from the nearest OpenStreetMap place. School and health distances to settlements are straight-line.</li>
+            <li>Settlements are the <span id="method-settlement-count">mapped</span> GRID3 v3.0 built-up and small settlement areas (50+ buildings, CIESIN 2024); hamlets are excluded. Each has a WorldPop 2025 population estimate summed inside its extent, and a name borrowed from the nearest OpenStreetMap place. School and health distances to settlements are walking distances along roads and footpaths.</li>
             <li>The MHFR registry layer (Ministry of Health, operational facilities, including private and CHAM clinics) is a separate reference layer and does not recalculate baseline health coverage. Where it overlaps the MOH baseline, positions are identical.</li>
             <li>Road travel time runs from each cell's population centre: walking to the nearest mapped road at 5 km/h, then the quickest road route at indicative motorcycle speeds. Flood zones come from the JRC Copernicus EMS GloFAS global river flood hazard map (1-in-100-year, about 90 m), a global model rather than an official national flood map. Candidate sites are also checked for slope (Mapzen Terrain Tiles) and land cover (ESA WorldCover).</li>
             <li>Available water-point extracts contain no Dedza points. Mapped waterways are not water points. Route choices use the mapped road/path network and compare shortest distance with estimated time based on assumed speeds; they do not model traffic, road condition or seasonal closures, and unmapped roads may change results.</li>
@@ -276,7 +289,7 @@
       </section>
       <section class="table-wrap analysis-panel" id="priority-panel" hidden>
         <h2>Priority screening cells</h2>
-        <p>Highest-scoring 3 km cells, combining projected 2030 residents, growth, distance to the nearest facility, road access and flood safety. Scores follow the Priority weights settings; "new" marks cells that are not in the baseline top 12. Select a row to zoom to it.</p>
+        <p>Highest-scoring 3 km cells, combining projected 2030 residents, growth, walking distance to the nearest facility, road access and flood safety. Scores follow the Priority weights settings; "new" marks cells that are not in the baseline top 12. Select a row to zoom to it.</p>
         <div class="table-scroll">
           <table>
             <thead>
@@ -298,7 +311,7 @@
       </section>
       <section class="table-wrap analysis-panel" id="ta-panel" hidden>
         <h2>Traditional Authority priorities</h2>
-        <p>Ranked by estimated population in baseline health cells more than 8 km from a facility (WorldPop 2025). The share shows the proportion of each TA's estimated population affected. This is a screening priority, not a measure of facility capacity. Select a row to filter the map.</p>
+        <p>Ranked by estimated population in baseline health cells more than 8 km from a facility (WorldPop 2025). The share shows the proportion of each TA's estimated population affected. Settlement columns use fixed baseline walking distances (1 km to a school, 5 km to a health facility) and do not follow the sliders. This is a screening priority, not a measure of facility capacity. Select a row to filter the map.</p>
         <div class="table-scroll">
           <table>
             <thead>
@@ -309,8 +322,8 @@
                 <th>MHFR registry facilities</th>
                 <th>Schools</th>
                 <th>Settlements</th>
-                <th>Settlements ≤ 1 km from school</th>
-                <th>Settlements &gt; 5 km from health</th>
+                <th>Settlements ≤ 1 km walk to school</th>
+                <th>Settlements &gt; 5 km walk to health</th>
                 <th>Unserved health cells</th>
                 <th>Est. population in unserved cells</th>
                 <th>Est. share of TA population</th>
@@ -322,7 +335,7 @@
       </section>
       <section class="table-wrap analysis-panel" id="settlement-panel" hidden>
         <h2>Settlement-level access</h2>
-        <p>GRID3 settlements, most remote from health care first. Nearest mapped school and health facility by straight-line distance; population is the WorldPop 2025 estimate inside each settlement extent. Select a row to zoom to it.</p>
+        <p>GRID3 settlements, most remote from health care first. Nearest mapped school and health facility by walking distance along roads and footpaths; population is the WorldPop 2025 estimate inside each settlement extent. Select a row to zoom to it.</p>
         <div class="table-scroll">
           <table>
             <thead>

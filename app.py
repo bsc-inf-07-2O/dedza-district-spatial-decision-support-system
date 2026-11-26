@@ -21,10 +21,23 @@ from rasterio.transform import Affine, from_bounds
 from rasterio.windows import Window, from_bounds as window_from_bounds
 from rasterio.warp import Resampling, reproject
 
+import shapely
+from rasterio.features import shapes
 from shapely import STRtree
 from shapely.geometry import shape as shapely_shape
+from shapely.ops import unary_union
 
 from scripts.planning_analysis import FLOOD_DEPTH_PATH, PERMANENT_WATER_PATH, POPULATION_PATHS
+from scripts.road_network import (
+    WALKING_SPEED_KMH,
+    NodeIndex,
+    build_graph,
+    fetch_road_rows,
+    haversine_km,
+    motorcycle_speed_kmh,
+    road_lines,
+    shortest_costs,
+)
 from scripts.site_constraints import point_in_geometry
 from scripts.site_suitability import SiteChecker
 
@@ -56,11 +69,9 @@ app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 SCENARIO_TRAVEL_TIME_BANDS_MIN = (30, 60)
 MAX_ROAD_SNAP_KM = 1.0
 MAX_SCENARIO_TRAVEL_TIME_MIN = max(SCENARIO_TRAVEL_TIME_BANDS_MIN)
-_ROAD_NODE_INDEX: tuple[
-    dict[tuple[float, float], tuple[float, float]],
-    tuple[tuple[float, float], ...],
-    np.ndarray,
-] | None = None
+ROUTE_MODES = ("walking", "vehicle")
+# Nearest-node lookup arrays, one per network (keyed by the projected-node dict).
+_ROAD_NODE_INDEX: dict[int, tuple[tuple[tuple[float, float], ...], np.ndarray]] = {}
 
 
 class RouteNetworkUnavailable(Exception):
@@ -69,15 +80,6 @@ class RouteNetworkUnavailable(Exception):
 
 class RouteEndpointTooFar(Exception):
     pass
-
-
-def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
-    lon1, lat1 = map(math.radians, a)
-    lon2, lat2 = map(math.radians, b)
-    dlon = lon2 - lon1
-    dlat = lat2 - lat1
-    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return 12_742 * math.asin(math.sqrt(h))
 
 
 def circle_polygon(lon: float, lat: float, radius_km: float, steps: int = 64) -> dict:
@@ -100,24 +102,6 @@ def circle_polygon(lon: float, lat: float, radius_km: float, steps: int = 64) ->
     return {"type": "Polygon", "coordinates": [ring]}
 
 
-def motorcycle_speed_kmh(highway: str) -> float:
-    if highway.endswith("_link"):
-        highway = highway[:-5]
-    return {
-        "motorway": 40.0,
-        "trunk": 40.0,
-        "primary": 35.0,
-        "secondary": 30.0,
-        "tertiary": 25.0,
-        "residential": 20.0,
-        "unclassified": 20.0,
-        "living_street": 20.0,
-        "service": 10.0,
-        "track": 10.0,
-        "path": 10.0,
-    }.get(highway, 15.0)
-
-
 def motorcycle_speed_assumptions_kmh() -> dict[str, float]:
     return {
         "motorway/trunk": motorcycle_speed_kmh("motorway"),
@@ -130,21 +114,6 @@ def motorcycle_speed_assumptions_kmh() -> dict[str, float]:
     }
 
 
-def road_lines(geometry: dict) -> list[list[list[float]]]:
-    geometry_type = geometry.get("type")
-    if geometry_type == "LineString":
-        return [geometry.get("coordinates", [])]
-    if geometry_type == "MultiLineString":
-        return geometry.get("coordinates", [])
-    if geometry_type == "GeometryCollection":
-        return [
-            line
-            for part in geometry.get("geometries", [])
-            for line in road_lines(part)
-        ]
-    return []
-
-
 def project_road_node(node: tuple[float, float]) -> tuple[float, float]:
     lon, lat = node
     return (
@@ -154,73 +123,22 @@ def project_road_node(node: tuple[float, float]) -> tuple[float, float]:
 
 
 @lru_cache(maxsize=1)
-def load_road_network() -> tuple[
+def road_rows() -> list[tuple[str, str, str]]:
+    return fetch_road_rows(ROUTE_DB_PATH)
+
+
+@lru_cache(maxsize=2)
+def load_road_network(mode: str = "vehicle") -> tuple[
     dict[tuple[float, float], list[tuple[tuple[float, float], float, float]]],
     dict[tuple[float, float], tuple[float, float]],
     dict[tuple[float, float], tuple[float, float]],
 ]:
-    if not ROUTE_DB_PATH.exists():
-        raise FileNotFoundError(
-            f"Road network database missing at {ROUTE_DB_PATH}. "
-            "Run: python scripts/build_db.py"
-        )
-
-    con = duckdb.connect(str(ROUTE_DB_PATH), read_only=True)
-    try:
-        con.execute("INSTALL spatial;")
-        con.execute("LOAD spatial;")
-        con.execute("SET geometry_always_xy = true;")
-        rows = con.execute(
-            """
-            WITH dedza AS (
-                SELECT geom
-                FROM ST_Read(?)
-                WHERE lower(shapeName) = 'dedza'
-            )
-            SELECT lower(coalesce(CAST(r.highway AS VARCHAR), '')) AS highway,
-                   lower(coalesce(CAST(r.oneway AS VARCHAR), '')) AS oneway,
-                   ST_AsGeoJSON(ST_Intersection(r.geom, d.geom)) AS geojson
-            FROM roads_clip r
-            CROSS JOIN dedza d
-            WHERE ST_Intersects(r.geom, d.geom)
-              AND lower(coalesce(CAST(r.highway AS VARCHAR), '')) NOT IN ('footway', 'pedestrian')
-            """,
-            [str(ADM2_PATH)],
-        ).fetchall()
-    finally:
-        con.close()
-
-    graph: dict[
-        tuple[float, float],
-        list[tuple[tuple[float, float], float, float]],
-    ] = {}
-    coordinates: dict[tuple[float, float], tuple[float, float]] = {}
-    for highway, oneway, geojson in rows:
-        if not geojson:
-            continue
-        speed_kmh = motorcycle_speed_kmh(highway)
-        geometry = json.loads(geojson)
-        for line in road_lines(geometry):
-            previous = None
-            for coordinate in line:
-                node = (round(float(coordinate[0]), 6), round(float(coordinate[1]), 6))
-                coordinates[node] = node
-                graph.setdefault(node, [])
-                if previous is not None and previous != node:
-                    distance = haversine_km(previous, node)
-                    travel_time_min = distance / speed_kmh * 60
-                    if oneway in ("yes", "true", "1"):
-                        graph[previous].append((node, distance, travel_time_min))
-                    elif oneway in ("-1", "reverse"):
-                        graph[node].append((previous, distance, travel_time_min))
-                    else:
-                        graph[previous].append((node, distance, travel_time_min))
-                        graph[node].append((previous, distance, travel_time_min))
-                previous = node
-
+    """Road graph for `mode`: "vehicle" (roads and tracks, motorcycle speeds,
+    one-way respected) or "walking" (all ways including paths, 5 km/h)."""
+    graph = build_graph(road_rows(), mode)
     if not graph:
         raise RouteNetworkUnavailable("No mapped road segments are available in Dedza.")
-
+    coordinates = {node: node for node in graph}
     projected = {node: project_road_node(node) for node in graph}
     return graph, coordinates, projected
 
@@ -229,18 +147,13 @@ def nearest_road_node(
     point: tuple[float, float],
     projected: dict[tuple[float, float], tuple[float, float]],
 ) -> tuple[float, float]:
-    global _ROAD_NODE_INDEX
-    if _ROAD_NODE_INDEX is None or _ROAD_NODE_INDEX[0] is not projected:
+    key = id(projected)
+    if key not in _ROAD_NODE_INDEX:
         nodes = tuple(projected)
-        node_coordinates = np.asarray([projected[node] for node in nodes], dtype=np.float64)
-        _ROAD_NODE_INDEX = (projected, nodes, node_coordinates)
-
-    point_xy = project_road_node(point)
-    nodes = _ROAD_NODE_INDEX[1]
-    node_coordinates = _ROAD_NODE_INDEX[2]
-    differences = node_coordinates - point_xy
-    nearest_index = int(np.argmin(np.einsum("ij,ij->i", differences, differences)))
-    return nodes[nearest_index]
+        _ROAD_NODE_INDEX[key] = (nodes, np.asarray([projected[node] for node in nodes], dtype=np.float64))
+    nodes, node_coordinates = _ROAD_NODE_INDEX[key]
+    differences = node_coordinates - project_road_node(point)
+    return nodes[int(np.argmin(np.einsum("ij,ij->i", differences, differences)))]
 
 
 def shortest_road_path(
@@ -514,14 +427,16 @@ def route_option(
 def calculate_road_route(
     origin: tuple[float, float],
     destination: tuple[float, float],
+    mode: str = "vehicle",
 ) -> dict | None:
-    graph, coordinates, projected = load_road_network()
+    graph, coordinates, projected = load_road_network(mode)
     start = nearest_road_node(origin, projected)
     target = nearest_road_node(destination, projected)
     origin_snap_km = haversine_km(origin, coordinates[start])
     destination_snap_km = haversine_km(destination, coordinates[target])
     if max(origin_snap_km, destination_snap_km) > 1:
-        raise RouteEndpointTooFar("An endpoint is more than 1 km from the mapped road network.")
+        network = "path or road" if mode == "walking" else "road"
+        raise RouteEndpointTooFar(f"An endpoint is more than 1 km from the mapped {network} network.")
 
     shortest_path = shortest_road_path(graph, start, target)
     if shortest_path is None:
@@ -530,9 +445,10 @@ def calculate_road_route(
         shortest_path,
         *alternative_road_paths(graph, shortest_path, 1, probe_count=1),
     ]
-    fastest_path = shortest_road_path(graph, start, target, optimize_time=True)
+    # On foot every way has the same speed, so the shortest route is also the quickest.
+    fastest_path = None if mode == "walking" else shortest_road_path(graph, start, target, optimize_time=True)
     path_labels: dict[tuple[tuple[float, float], ...], str] = {
-        tuple(distance_paths[0]): "Shortest distance",
+        tuple(distance_paths[0]): "Shortest walking route" if mode == "walking" else "Shortest distance",
     }
     if fastest_path is not None:
         fastest_key = tuple(fastest_path)
@@ -562,7 +478,7 @@ def calculate_road_route(
         )
         for path, label in path_labels.items()
     ]
-    return {**options[0], "alternatives": options}
+    return {**options[0], "alternatives": options, "mode": mode}
 
 
 def valid_lon_lat(value: object) -> tuple[float, float] | None:
@@ -822,6 +738,173 @@ def site_checker() -> SiteChecker:
 
 
 @lru_cache(maxsize=1)
+def walking_index() -> NodeIndex:
+    graph, _, _ = load_road_network("walking")
+    return NodeIndex(graph)
+
+
+def service_sites(kind: str) -> list[dict]:
+    """Existing services that walking distance is measured to.
+
+    Health uses the same 70 MOH facilities as the coverage grid (Dedza's own plus
+    those within 20 km across the border); schools are Dedza's schools.
+    """
+    if kind == "school":
+        return [{"name": s["name"], "lon": s["lon"], "lat": s["lat"]} for s in load_payloads()["schools"]]
+    con = db()
+    try:
+        rows = con.execute("SELECT name, lon, lat, in_dedza FROM distance_facilities").fetchall()
+    finally:
+        con.close()
+    if not rows:  # older database without the table
+        return [{"name": f["name"], "lon": f["lon"], "lat": f["lat"]} for f in load_payloads()["facilities"]]
+    return [{"name": r["name"], "lon": r["lon"], "lat": r["lat"], "in_dedza": bool(r["in_dedza"])} for r in rows]
+
+
+@lru_cache(maxsize=2)
+def service_walk_costs(kind: str) -> tuple[list[dict], dict, dict]:
+    """Walking distance (km) from every network node to the nearest service of
+    `kind`, including the walk from each service to its nearest node, and which
+    service is nearest."""
+    graph, _, _ = load_road_network("walking")
+    index = walking_index()
+    sites = service_sites(kind)
+    starts: dict[tuple[float, float], float] = {}
+    labels: dict[tuple[float, float], int] = {}
+    nearest, distance = index.nearest_points(
+        np.array([site["lon"] for site in sites], dtype=float), np.array([site["lat"] for site in sites], dtype=float)
+    )
+    for i, (node_i, snap) in enumerate(zip(nearest, distance)):
+        node = index.nodes[node_i]
+        if snap < starts.get(node, math.inf):
+            starts[node], labels[node] = snap, i
+    costs, origin = shortest_costs(graph, starts, weight="km", labels=labels)
+    return sites, costs, origin
+
+
+@lru_cache(maxsize=1)
+def settlement_nodes() -> list[tuple[tuple[float, float], float]]:
+    """Nearest walking-network node and the straight walk to it, per settlement."""
+    index = walking_index()
+    settlements = load_payloads()["settlements"]
+    nearest, distance = index.nearest_points(
+        np.array([float(s["lon"]) for s in settlements]), np.array([float(s["lat"]) for s in settlements])
+    )
+    return [(index.nodes[i], float(d)) for i, d in zip(nearest, distance)]
+
+
+def walking_reach(point: tuple[float, float], limit_km: float) -> tuple[dict, float]:
+    """Walking distance from `point` to every node within `limit_km`."""
+    graph, _, _ = load_road_network("walking")
+    node, snap = walking_index().nearest(point)
+    if snap > limit_km:
+        return {}, snap
+    costs, _ = shortest_costs(graph, {node: snap}, weight="km", limit=limit_km)
+    return costs, snap
+
+
+def walking_area_geometry(
+    costs: dict,
+    limit_km: float,
+    bounds: tuple[float, float, float, float],
+    cell_km: float,
+) -> dict | None:
+    """Area within `limit_km` walking distance, as a GeoJSON geometry.
+
+    Uses the same rule as the population counts: a location is within reach
+    when its straight walk to the nearest path node plus that node's walking
+    cost is at most `limit_km`. The rule is sampled on a `cell_km` grid over
+    `bounds` (west, south, east, north) and the reachable cells are merged.
+    """
+    west, south, east, north = bounds
+    mid_lat = (south + north) / 2
+    dlat = cell_km / 110.574
+    dlon = cell_km / (111.320 * math.cos(math.radians(mid_lat)))
+    cols = max(1, math.ceil((east - west) / dlon))
+    rows = max(1, math.ceil((north - south) / dlat))
+    lon = west + (np.arange(cols) + 0.5) * dlon
+    lat = north - (np.arange(rows) + 0.5) * dlat
+    grid_lon, grid_lat = np.meshgrid(lon, lat)
+
+    index = walking_index()
+    # A point further than limit_km from every path node is out of reach anyway.
+    nearest, snap = index.nearest_points(
+        grid_lon.ravel(), grid_lat.ravel(), cell_km=max(0.5, cell_km * 2), max_km=limit_km
+    )
+    node_cost = np.fromiter(
+        (costs.get(node, math.inf) for node in index.nodes), dtype=np.float64, count=len(index.nodes)
+    )
+    total = np.where(nearest >= 0, node_cost[np.maximum(nearest, 0)] + snap, math.inf)
+    within = (total <= limit_km).reshape(rows, cols)
+    if not within.any():
+        return None
+
+    transform = Affine(dlon, 0, west, 0, -dlat, north)
+    parts = [
+        shapely_shape(geometry)
+        for geometry, value in shapes(within.astype(np.uint8), mask=within, transform=transform)
+        if value == 1
+    ]
+    area = unary_union(parts).simplify(min(dlon, dlat) * 0.6, preserve_topology=True)
+    return json.loads(shapely.to_geojson(shapely.set_precision(area, 1e-5)))
+
+
+@lru_cache(maxsize=4)
+def health_walking_area(limit_km: float = 5.0) -> dict | None:
+    """Part of Dedza within `limit_km` walking distance of a baseline health
+    facility (including facilities across the border), clipped to the district."""
+    _, costs, _ = service_walk_costs("health")
+    boundary = unary_union([
+        shapely_shape(feature["geometry"]) for feature in load_payloads()["boundary"]["features"]
+    ])
+    geometry = walking_area_geometry(costs, limit_km, boundary.bounds, 0.25)
+    if geometry is None:
+        return None
+    clipped = shapely_shape(geometry).intersection(boundary)
+    return json.loads(shapely.to_geojson(shapely.set_precision(clipped, 1e-5)))
+
+
+@lru_cache(maxsize=1)
+def district_population_pixels() -> dict:
+    """Every populated WorldPop pixel in Dedza with its 2030 value, Traditional
+    Authority and nearest walking-network node (computed once, then reused)."""
+    boundary = [feature["geometry"] for feature in load_payloads()["boundary"]["features"]]
+    with rasterio.open(WORLDPOP_PATH) as source:
+        from rasterio.mask import mask as raster_mask
+
+        clipped, transform = raster_mask(source, boundary, crop=True, filled=True, nodata=source.nodata)
+        pop = clipped[0].astype(np.float64)
+        nodata, crs = source.nodata, source.crs
+    inside = geometry_mask(boundary, out_shape=pop.shape, transform=transform, invert=True)
+    pop_2030 = np.full(pop.shape, -1, dtype=np.float32)
+    with rasterio.open(WORLDPOP_2030_PATH) as source_2030:
+        reproject(
+            source=rasterio.band(source_2030, 1), destination=pop_2030,
+            src_transform=source_2030.transform, src_crs=source_2030.crs, src_nodata=source_2030.nodata,
+            dst_transform=transform, dst_crs=crs, dst_nodata=-1, resampling=Resampling.nearest,
+        )
+    ta_features = load_traditional_authorities()["features"]
+    ta_codes = rasterize(
+        [(feature["geometry"], i) for i, feature in enumerate(ta_features, start=1)],
+        out_shape=pop.shape, transform=transform, fill=0, all_touched=False, dtype="uint16",
+    )
+    valid = inside & np.isfinite(pop) & (pop > 0) & (pop != nodata)
+    rows, cols = np.nonzero(valid)
+    lon = transform.c + (cols + 0.5) * transform.a
+    lat = transform.f + (rows + 0.5) * transform.e
+    node_index, snap = walking_index().nearest_points(lon, lat)
+    p30 = pop_2030[rows, cols].astype(np.float64)
+    return {
+        "lon": lon, "lat": lat,
+        "pop": pop[rows, cols],
+        "pop_2030": np.where(np.isfinite(p30) & (p30 >= 0), p30, 0),
+        "ta": ta_codes[rows, cols],
+        "ta_names": [feature["properties"]["name"] for feature in ta_features],
+        "node": node_index, "snap": snap,
+    }
+
+
+@lru_cache(maxsize=1)
 def settlement_planning() -> list[dict]:
     """2030 population and site suitability for every settlement.
 
@@ -836,8 +919,19 @@ def settlement_planning() -> list[dict]:
     district_ratio = float(meta.get("population_2030", 1)) / max(float(meta.get("population_2025", 1)), 1)
     points = [(float(s["lon"]), float(s["lat"])) for s in payloads["settlements"]]
     checks = site_checker().check_many(points)
+    nodes = settlement_nodes()
+    health_sites, health_costs, health_origin = service_walk_costs("health")
+    school_sites, school_costs, school_origin = service_walk_costs("school")
+
+    def nearest_service(node, snap, sites, costs, origin):
+        if node not in costs:
+            return None, None
+        return round(costs[node] + snap, 2), sites[origin[node]]
+
     result = []
-    for settlement, point, check in zip(payloads["settlements"], points, checks):
+    for settlement, point, check, (node, snap) in zip(payloads["settlements"], points, checks, nodes):
+        walk_health, health = nearest_service(node, snap, health_sites, health_costs, health_origin)
+        walk_school, school = nearest_service(node, snap, school_sites, school_costs, school_origin)
         ratio = district_ratio
         for index in tree.query(shapely_shape({"type": "Point", "coordinates": point}), predicate="within"):
             props = cells[int(index)]["properties"]
@@ -846,6 +940,10 @@ def settlement_planning() -> list[dict]:
             break
         population = float(settlement["population"] or 0)
         result.append({
+            "walk_km_health": walk_health,
+            "nearest_health": health,
+            "walk_km_school": walk_school,
+            "nearest_school_index": None if school is None else school_sites.index(school),
             "population_2030": round(population * ratio, 1),
             "site_suitable": check["suitable"],
             "site_issues": [
@@ -982,138 +1080,173 @@ def estimate_scenario_population(
     radius_km: float,
     facility_type: str,
 ) -> dict:
-    boundary = load_payloads()["boundary"]
-    boundary_geometries = [feature["geometry"] for feature in boundary["features"]]
+    """Residents within `radius_km` walking distance of a candidate site.
+
+    Walking distance runs along roads, tracks and paths: a straight walk from the
+    pixel (or settlement) to its nearest path node, then the shortest route. A
+    resident counts as newly reached when the candidate is within the radius and
+    no existing service of the same type is.
+    """
+    boundary_geometries = [feature["geometry"] for feature in load_payloads()["boundary"]["features"]]
     point_transform = Affine(1e-8, 0, lon - 0.5e-8, 0, -1e-8, lat + 0.5e-8)
-    if not geometry_mask(
-        boundary_geometries,
-        out_shape=(1, 1),
-        transform=point_transform,
-        invert=True,
-    )[0, 0]:
+    if not geometry_mask(boundary_geometries, out_shape=(1, 1), transform=point_transform, invert=True)[0, 0]:
         raise ValueError("Candidate site must be inside Dedza District.")
-
-    payloads = load_payloads()
-    existing_sites = payloads["schools"] if facility_type == "school" else payloads["facilities"]
-    nearby_sites = [
-        site
-        for site in existing_sites
-        if haversine_km((lon, lat), (site["lon"], site["lat"])) <= 2 * radius_km + 0.1
-    ]
-    candidate_area = circle_polygon(lon, lat, radius_km)
-    candidate_ring = candidate_area["coordinates"][0]
-    left = min(point[0] for point in candidate_ring)
-    bottom = min(point[1] for point in candidate_ring)
-    right = max(point[0] for point in candidate_ring)
-    top = max(point[1] for point in candidate_ring)
-    ta_features = load_traditional_authorities()["features"]
-
     if not WORLDPOP_PATH.is_file():
         raise FileNotFoundError(f"WorldPop raster not found: {WORLDPOP_PATH}")
 
-    with rasterio.open(WORLDPOP_PATH) as source:
-        window = window_from_bounds(left, bottom, right, top, source.transform)
-        window = window.round_offsets(op=math.floor).round_lengths(op=math.ceil).intersection(
-            Window(0, 0, source.width, source.height)
-        )
-        population = source.read(1, window=window)
-        transform = source.window_transform(window)
-        # WorldPop's 2030 projection resampled onto the same 100 m pixels.
-        population_2030 = np.full(population.shape, -1, dtype=np.float32)
-        with rasterio.open(WORLDPOP_2030_PATH) as source_2030:
-            reproject(
-                source=rasterio.band(source_2030, 1),
-                destination=population_2030,
-                src_transform=source_2030.transform,
-                src_crs=source_2030.crs,
-                src_nodata=source_2030.nodata,
-                dst_transform=transform,
-                dst_crs=source.crs,
-                dst_nodata=-1,
-                resampling=Resampling.nearest,
-            )
-        population_2030 = np.where(np.isfinite(population_2030) & (population_2030 >= 0), population_2030, 0)
-        inside_district = geometry_mask(
-            boundary_geometries,
-            out_shape=population.shape,
-            transform=transform,
-            invert=True,
-        )
-        candidate_mask = rasterize(
-            [(candidate_area, 1)],
-            out_shape=population.shape,
-            transform=transform,
-            fill=0,
-            all_touched=False,
-        ).astype(bool)
-        existing_shapes = [
-            (circle_polygon(site["lon"], site["lat"], radius_km), 1)
-            for site in nearby_sites
-        ]
-        existing_mask = rasterize(
-            existing_shapes,
-            out_shape=population.shape,
-            transform=transform,
-            fill=0,
-            all_touched=False,
-        ).astype(bool) if existing_shapes else np.zeros(population.shape, dtype=bool)
-        ta_codes = rasterize(
-            [
-                (feature["geometry"], index)
-                for index, feature in enumerate(ta_features, start=1)
-            ],
-            out_shape=population.shape,
-            transform=transform,
-            fill=0,
-            all_touched=False,
-            dtype="uint16",
-        )
-        valid_population = np.isfinite(population) & (population >= 0)
-        if source.nodata is not None:
-            valid_population &= population != source.nodata
-        candidate_population_mask = candidate_mask & inside_district & valid_population
-        gained_population_mask = candidate_population_mask & ~existing_mask
-        total_within_radius = float(population[candidate_population_mask].sum(dtype=np.float64))
-        previously_covered = float(
-            population[candidate_population_mask & existing_mask].sum(dtype=np.float64)
-        )
-        gained_population = float(population[gained_population_mask].sum(dtype=np.float64))
-        total_within_radius_2030 = float(population_2030[candidate_population_mask].sum(dtype=np.float64))
-        gained_population_2030 = float(population_2030[gained_population_mask].sum(dtype=np.float64))
-        by_ta = []
-        for index, feature in enumerate(ta_features, start=1):
-            estimate = float(
-                population[gained_population_mask & (ta_codes == index)].sum(dtype=np.float64)
-            )
-            if estimate > 0:
-                by_ta.append({
-                    "name": feature["properties"]["name"],
-                    "population_estimate": round(estimate, 2),
-                })
-        assigned_population = sum(row["population_estimate"] for row in by_ta)
-        outside_tas = round(max(0.0, gained_population - assigned_population), 2)
-        if outside_tas > 0:
-            by_ta.append({
-                "name": "Outside mapped TA boundaries",
-                "population_estimate": outside_tas,
-            })
+    kind = "school" if facility_type == "school" else "health"
+    reach, candidate_snap = walking_reach((lon, lat), radius_km)
+    _, existing_costs, _ = service_walk_costs(kind)
+    pixels = district_population_pixels()
+    nodes = walking_index().nodes
 
+    # Only pixels near the candidate can be within walking reach.
+    margin = (radius_km + 1) / 110.574
+    near = np.nonzero(
+        (np.abs(pixels["lat"] - lat) <= margin)
+        & (np.abs(pixels["lon"] - lon) <= margin / max(math.cos(math.radians(lat)), 0.1))
+    )[0]
+    to_candidate = np.array([
+        reach.get(nodes[pixels["node"][i]], math.inf) + pixels["snap"][i] for i in near
+    ])
+    to_existing = np.array([
+        existing_costs.get(nodes[pixels["node"][i]], math.inf) + pixels["snap"][i] for i in near
+    ])
+    within = near[to_candidate <= radius_km] if near.size else near
+    covered = to_existing[to_candidate <= radius_km] <= radius_km if near.size else np.array([], bool)
+    gained = within[~covered]
+    already = within[covered]
+
+    def total(indices, key="pop"):
+        return float(pixels[key][indices].sum()) if len(indices) else 0.0
+
+    by_ta = []
+    for code, name in enumerate(pixels["ta_names"], start=1):
+        estimate = total(gained[pixels["ta"][gained] == code])
+        if estimate > 0:
+            by_ta.append({"name": name, "population_estimate": round(estimate, 2)})
+    outside_tas = round(max(0.0, total(gained) - sum(row["population_estimate"] for row in by_ta)), 2)
+    if outside_tas > 0:
+        by_ta.append({"name": "Outside mapped TA boundaries", "population_estimate": outside_tas})
+
+    # Settlements newly within walking distance (for the settlement counts).
+    reached_settlements = []
+    for i, (node, snap) in enumerate(settlement_nodes()):
+        distance = reach.get(node, math.inf) + snap
+        if distance <= radius_km:
+            reached_settlements.append({"index": i, "walk_km": round(distance, 2)})
+
+    lon_margin = margin / max(math.cos(math.radians(lat)), 0.1)
+    reach_geometry = walking_area_geometry(
+        reach,
+        radius_km,
+        (lon - lon_margin, lat - margin, lon + lon_margin, lat + margin),
+        max(0.1, radius_km / 50),
+    )
+
+    service_label = "school" if facility_type == "school" else "baseline health facility"
     return {
-        "population_within_radius": round(total_within_radius, 2),
-        "already_within_existing_service_radius": round(previously_covered, 2),
-        "additional_population_estimate": round(gained_population, 2),
-        "population_within_radius_2030": round(total_within_radius_2030, 2),
-        "additional_population_2030": round(gained_population_2030, 2),
-        "by_traditional_authority": sorted(
-            by_ta,
-            key=lambda row: (-row["population_estimate"], row["name"]),
-        ),
+        "walking_reach_geojson": reach_geometry,
+        "population_within_radius": round(total(within), 2),
+        "already_within_existing_service_radius": round(total(already), 2),
+        "additional_population_estimate": round(total(gained), 2),
+        "population_within_radius_2030": round(total(within, "pop_2030"), 2),
+        "additional_population_2030": round(total(gained, "pop_2030"), 2),
+        "by_traditional_authority": sorted(by_ta, key=lambda row: (-row["population_estimate"], row["name"])),
+        "reached_settlements": reached_settlements,
+        "candidate_path_distance_km": round(candidate_snap, 2),
+        "distance_method": "walking",
         "method": (
-            "WorldPop 2025 100 m population pixels inside the candidate's straight-line radius, "
-            f"excluding pixels already inside an existing {'school' if facility_type == 'school' else 'baseline health-facility'} equal-radius zone. "
-            "2030 figures use WorldPop's 2030 projection on the same pixels."
+            f"WorldPop 2025 100 m population pixels within {radius_km:g} km walking distance of the candidate "
+            "along mapped roads, tracks and paths, excluding pixels already within the same walking distance "
+            f"of an existing {service_label}. 2030 figures use WorldPop's 2030 projection on the same pixels."
         ),
     }
+
+
+def suggest_sites(facility_type: str, radius_km: float, area: str | None, exclude: list, count: int = 3) -> list[dict]:
+    """Greedy maximal coverage on walking distance.
+
+    Demand: settlements in scope whose walk to the nearest existing service is
+    longer than the radius, weighted by projected 2030 residents. Candidate
+    sites: settlements in scope that pass the site checks. Straight-line reach
+    is an upper bound of walking reach, so candidates are evaluated lazily
+    (exact walking reach only for the most promising ones).
+    """
+    payloads = load_payloads()
+    settlements = payloads["settlements"]
+    planning = settlement_planning()
+    nodes = settlement_nodes()
+    key = "walk_km_school" if facility_type == "school" else "walk_km_health"
+    scope = None
+    if area:
+        scope = next(
+            (f["geometry"] for f in load_traditional_authorities()["features"] if f["properties"]["name"] == area),
+            None,
+        )
+        if scope is None:
+            raise ValueError(f"Unknown area: {area}")
+    in_scope = [
+        scope is None or point_in_geometry((float(s["lon"]), float(s["lat"])), scope) for s in settlements
+    ]
+    excluded_reach = [walking_reach(tuple(point), radius_km) for point in exclude]
+
+    def reached_by_excluded(i: int) -> bool:
+        node, snap = nodes[i]
+        return any(costs.get(node, math.inf) + snap + 0 <= radius_km for costs, _ in excluded_reach)
+
+    weight = {
+        i: planning[i]["population_2030"]
+        for i in range(len(settlements))
+        if in_scope[i]
+        and planning[i]["population_2030"] > 0
+        and (planning[i][key] is None or planning[i][key] > radius_km)
+        and not reached_by_excluded(i)
+    }
+    if not weight:
+        return []
+    demand = np.array(sorted(weight))
+    lon = np.array([float(settlements[i]["lon"]) for i in demand])
+    lat = np.array([float(settlements[i]["lat"]) for i in demand])
+    pop = np.array([weight[i] for i in demand])
+    candidates = [i for i in range(len(settlements)) if in_scope[i] and planning[i]["site_suitable"]]
+
+    heap = []
+    for c in candidates:
+        cx, cy = float(settlements[c]["lon"]), float(settlements[c]["lat"])
+        straight = np.hypot((lon - cx) * 111.32 * math.cos(math.radians(cy)), (lat - cy) * 110.574)
+        bound = float(pop[straight <= radius_km].sum())
+        if bound > 0:
+            heap.append((-bound, c, -1))
+    heapq.heapify(heap)
+    reach_cache: dict[int, set[int]] = {}
+    covered: set[int] = set()
+    picks = []
+    while heap and len(picks) < count:
+        negative, c, evaluated_at = heapq.heappop(heap)
+        if evaluated_at == len(picks):
+            if -negative <= 0:
+                break
+            newly = reach_cache[c] - covered
+            covered |= newly
+            picks.append({
+                "index": c,
+                "name": settlements[c]["name"],
+                "adm3_name": settlements[c].get("adm3_name"),
+                "coordinates": [float(settlements[c]["lon"]), float(settlements[c]["lat"])],
+                "people": round(sum(weight[j] for j in newly), 1),
+                "settlement_count": len(newly),
+            })
+            continue
+        if c not in reach_cache:
+            costs, _ = walking_reach((float(settlements[c]["lon"]), float(settlements[c]["lat"])), radius_km)
+            reach_cache[c] = {
+                int(j) for j in demand
+                if costs.get(nodes[j][0], math.inf) + nodes[j][1] <= radius_km
+            }
+        gain = sum(weight[j] for j in reach_cache[c] - covered)
+        heapq.heappush(heap, (-gain, c, len(picks)))
+    return picks
 
 
 @app.get("/")
@@ -1236,6 +1369,7 @@ def priority_baseline() -> tuple[dict[str, float], dict[str, float]]:
         "growth_full": float(meta["growth_full_score"]),
         "distance_full_m": float(meta["distance_full_m"]),
         "served_multiplier": float(meta["served_multiplier"]),
+        "full_score_percentile": float(meta.get("full_score_percentile", 0.75)),
     }
     return weights, scales
 
@@ -1244,11 +1378,13 @@ def priority_baseline() -> tuple[dict[str, float], dict[str, float]]:
 def priority_scenario():
     """Re-score every grid cell in SQL with user-chosen criterion weights.
 
-    Uses the same normalisation as the build-time score in scripts/build_db.py:
-    WorldPop residents capped at the stored population_full_score, distance capped at 16 km and
-    normalised to 8 km, road length capped at 8 km, mapped-waterway length capped
-    at 4 km, and a 0.35 multiplier for served cells. Weights are normalised to
-    sum to 1, so the stored baseline weights (meta table) reproduce the baseline.
+    Uses the same normalisation as the build-time score in scripts/build_db.py,
+    with the scales stored in the meta table: projected 2030 residents and
+    2025-2030 growth reach a full score at their stored percentile values,
+    walking distance to care at distance_full_m, road access and flood safety
+    are already shares (0-1), and served cells are multiplied by
+    served_multiplier. Weights are normalised to sum to 1, so the stored
+    baseline weights reproduce the baseline ranking.
     """
     baseline_weights, scales = priority_baseline()
     try:
@@ -1528,8 +1664,11 @@ def route():
         return jsonify(
             {"error": "Origin and destination must be [longitude, latitude] coordinates."}
         ), 400
+    mode = payload.get("mode", "vehicle")
+    if mode not in ROUTE_MODES:
+        return jsonify({"error": 'mode must be "walking" or "vehicle".'}), 400
     try:
-        result = calculate_road_route(origin, destination)
+        result = calculate_road_route(origin, destination, mode)
     except FileNotFoundError as error:
         return jsonify({"error": str(error)}), 503
     except RouteNetworkUnavailable as error:
@@ -1620,6 +1759,26 @@ def scenario_population():
     return jsonify(estimate)
 
 
+@app.get("/api/health-walking-area")
+def health_walking_area_api():
+    try:
+        geometry = health_walking_area(5.0)
+    except (FileNotFoundError, RouteNetworkUnavailable) as error:
+        return jsonify({"error": f"Walking network unavailable: {error}"}), 503
+    return jsonify({
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": {
+            "limit_km": 5.0,
+            "method": (
+                "Area within 5 km walking distance of a baseline MOH health facility (including facilities "
+                "within 20 km across the district border) along mapped roads, tracks and paths, sampled on a "
+                "250 m grid: a straight walk to the nearest path, then the shortest route."
+            ),
+        },
+    })
+
+
 @app.get("/api/schools")
 def schools():
     return jsonify(
@@ -1673,6 +1832,36 @@ def settlements():
     )
 
 
+@app.post("/api/suggest-sites")
+def suggested_sites():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "A JSON request body is required."}), 400
+    facility_type = data.get("type")
+    if facility_type not in ("school", "health"):
+        return jsonify({"error": 'type must be "school" or "health".'}), 400
+    radius = data.get("radius_km")
+    if isinstance(radius, bool) or not isinstance(radius, (int, float)) or not 1 <= radius <= 50:
+        return jsonify({"error": "radius_km must be a number between 1 and 50."}), 400
+    exclude = [valid_lon_lat(point) for point in data.get("exclude") or []]
+    if any(point is None for point in exclude):
+        return jsonify({"error": "exclude must be a list of [longitude, latitude] pairs."}), 400
+    count = data.get("count", 3)
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
+        return jsonify({"error": "count must be an integer between 1 and 10."}), 400
+    try:
+        picks = suggest_sites(facility_type, float(radius), data.get("area") or None, exclude, count)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify({
+        "picks": picks,
+        "method": (
+            "Greedy maximal coverage: each pick is the suitable settlement location that brings the most "
+            f"projected 2030 residents of unserved settlements within {float(radius):g} km walking distance."
+        ),
+    })
+
+
 @app.get("/api/site-check")
 def site_check():
     """Flood, road, slope and land-cover checks for one point."""
@@ -1711,6 +1900,9 @@ def warm_caches() -> None:
         load_road_network()
         for facility_type in ("health", "school"):
             scenario_baseline_road_times(facility_type)
+        settlement_planning()
+        district_population_pixels()
+        health_walking_area(5.0)
         print("Road network and scenario baselines ready.", flush=True)
     except Exception as error:  # the app still works; the first comparison is just slower
         print(f"Cache warm-up skipped: {error}", flush=True)

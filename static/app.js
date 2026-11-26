@@ -119,13 +119,13 @@ mapLegend.onAdd = () => {
       <span class="map-legend-heading">Other layers</span>
       <ul class="legend">
         <li data-layer="registry"><span class="swatch facility-registry"></span> MHFR registry facility</li>
-        <li data-layer="buffers"><span class="swatch buffer-ring"></span> 5 km facility coverage ring</li>
+        <li data-layer="buffers"><span class="swatch buffer-ring"></span> Within 5 km walk of a health facility</li>
         <li data-layer="schools"><span class="swatch school"></span> School</li>
         <li data-layer="settlements"><span class="swatch settlement-in"></span> Settlement within school radius</li>
         <li data-layer="settlements"><span class="swatch settlement-out"></span> Settlement beyond school radius</li>
         <li data-layer="roads"><span class="swatch road"></span> Road</li>
         <li data-layer="water"><span class="swatch water"></span> Mapped waterway</li>
-        <li data-layer="scenario"><span class="swatch scenario-site"></span> Candidate site and radius</li>
+        <li data-layer="scenario"><span class="swatch scenario-site"></span> Candidate site and walking reach</li>
         <li data-layer="buildings"><span class="swatch building"></span> Detected building footprint</li>
         <li data-layer="slope"><span class="swatch environmental-slope"></span> Slope: low to high</li>
         <li data-layer="landCover"><span class="swatch environmental-landcover"></span> WorldCover land cover</li>
@@ -211,6 +211,12 @@ function plural(count, word) {
 function nearPlace(name) {
   const text = String(name || "an unnamed settlement");
   return /^near /i.test(text) ? `near ${text.slice(5)}` : `near ${text}`;
+}
+
+function ordinal(n) {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th");
+  return `${n}${suffix}`;
 }
 
 function escapeHtml(value) {
@@ -403,6 +409,7 @@ async function init() {
   const districtButton = document.getElementById("clear-ta");
   const routeSettlementSelect = document.getElementById("route-settlement");
   const routeFacilitySelect = document.getElementById("route-facility");
+  const routeModeSelect = document.getElementById("route-mode");
   const findRouteButton = document.getElementById("find-route");
   const clearRouteButton = document.getElementById("clear-route");
   const routeResultsPanel = document.getElementById("route-results-panel");
@@ -663,7 +670,7 @@ async function init() {
       const selected = select.options[select.selectedIndex];
       triggerText.replaceChildren();
       const main = document.createElement("span");
-      main.textContent = selected?.textContent.trim() || "Select an option";
+      main.textContent = selected?.dataset.triggerLabel || selected?.textContent.trim() || "Select an option";
       triggerText.appendChild(main);
       if (selected?.value && selected.dataset.meta) {
         const meta = document.createElement("small");
@@ -863,7 +870,7 @@ async function init() {
     }).observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "label"] });
     renderOptions();
   }
-  [taSelect, routeSettlementSelect, routeFacilitySelect, scenarioTypeInput].forEach(enhanceSelect);
+  [taSelect, routeModeSelect, routeSettlementSelect, routeFacilitySelect, scenarioTypeInput].forEach(enhanceSelect);
 
   function enhanceNumberInput(input) {
     const label = document.querySelector(`label[for="${input.id}"]`);
@@ -912,26 +919,18 @@ async function init() {
   }
   [schoolRadiusInput, scenarioRadiusInput].forEach(enhanceNumberInput);
 
+  // Walking distance (km) along roads, tracks and paths, calculated on the server.
   settlements.features.forEach((settlement) => {
-    let nearest = null;
-    schools.features.forEach((school) => {
-      const distance = turf.distance(settlement, school, { units: "kilometers" });
-      if (!nearest || distance < nearest.distance) nearest = { school, distance };
-    });
-    nearestSchoolBySettlement.set(settlement, nearest);
-
-    let nearestFacility = null;
-    facilities.forEach((facility) => {
-      const schoolDistance = turf.distance(
-        settlement,
-        turf.point([facility.lon, facility.lat]),
-        { units: "kilometers" }
-      );
-      if (!nearestFacility || schoolDistance < nearestFacility.distance) {
-        nearestFacility = { facility, distance: schoolDistance };
-      }
-    });
-    nearestFacilityBySettlement.set(settlement, nearestFacility);
+    const p = settlement.properties;
+    const school = p.nearest_school_index == null ? null : schools.features[p.nearest_school_index];
+    nearestSchoolBySettlement.set(
+      settlement,
+      school && p.walk_km_school != null ? { school, distance: Number(p.walk_km_school) } : null
+    );
+    nearestFacilityBySettlement.set(
+      settlement,
+      p.nearest_health && p.walk_km_health != null ? { facility: p.nearest_health, distance: Number(p.walk_km_health) } : null
+    );
   });
 
   function intersectsSelectedArea(feature) {
@@ -1116,19 +1115,19 @@ async function init() {
     const averageTravel = cellTotals.travelPeople ? cellTotals.travelWeighted / cellTotals.travelPeople : null;
 
     document.getElementById("briefing-title").textContent = `${areaName} · Public-service access`;
-    document.getElementById("briefing-lead").textContent = `${populationLead} WorldPop projects ${Math.round(cellTotals.population2030).toLocaleString()} people by 2030 (+${growthPct.toFixed(1)}%). ${metrics.healthGaps} of ${active.settlements.length} mapped settlements are more than 5 km from a baseline health facility.`;
+    document.getElementById("briefing-lead").textContent = `${populationLead} WorldPop projects ${Math.round(cellTotals.population2030).toLocaleString()} people by 2030 (+${growthPct.toFixed(1)}%). ${metrics.healthGaps} of ${active.settlements.length} mapped settlements are more than a 5 km walk from a baseline health facility.`;
     document.getElementById("briefing-kpis").innerHTML = [
       [Math.round(populationTotal).toLocaleString(), "WorldPop 2025 estimate"],
       [`${populationShare.toFixed(1)}%`, "Population in unserved health cells"],
       [`+${Math.round(cellTotals.population2030 - cellTotals.population).toLocaleString()}`, "More residents by 2030 (WorldPop projection)"],
       [formatMinutes(averageTravel), "Average road travel time to care"],
       [formatShare(cellTotals.population ? cellTotals.nearRoad / cellTotals.population : 0), `Residents within ${roadAccessKm} km of a classified road`],
-      [`${metrics.healthGaps}/${active.settlements.length}`, "Settlements > 5 km from baseline health"],
+      [`${metrics.healthGaps}/${active.settlements.length}`, "Settlements > 5 km walk from baseline health"],
       [`${metrics.schoolReach}/${active.settlements.length}`, `Settlements within ${schoolRadiusKm} km of school`],
     ].map(([value, label]) => `<div class="briefing-kpi"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
     const signals = [
       `<strong>Health access:</strong> ${metrics.unservedCells} grid cells (${metrics.unservedArea.toFixed(0)} km²) are beyond the 8 km baseline threshold.`,
-      `<strong>Education proximity:</strong> ${metrics.schoolReach} of ${active.settlements.length} mapped settlements are within ${schoolRadiusKm} km straight-line distance of a school.`,
+      `<strong>Education proximity:</strong> ${metrics.schoolReach} of ${active.settlements.length} mapped settlements are within ${schoolRadiusKm} km walking distance of a school.`,
       `<strong>Travel and roads:</strong> residents average ${escapeHtml(formatMinutes(averageTravel))} by road to the nearest facility; ${formatShare(cellTotals.population ? cellTotals.nearRoad / cellTotals.population : 0)} live within ${roadAccessKm} km of a classified road.`,
       `<strong>Flood exposure:</strong> about ${Math.round(cellTotals.flooded).toLocaleString()} residents live in the 1-in-100-year river flood zone (JRC GloFAS).`,
       `<strong>Facility sources:</strong> ${active.facilities.length} baseline facilities inform the access grid; ${active.registry.features.length} operational facilities from the official MHFR registry are shown separately.`,
@@ -1174,10 +1173,12 @@ async function init() {
       }
     }
 
-    const healthSite = computeSuggestedSites(active, "health", 5, 1)[0];
-    if (healthSite) {
-      const text = `Plan a new health centre ${nearPlace(healthSite.site.properties.name)}: a 5 km catchment there would cover about ${fmt(healthSite.people)} people by 2030 in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care. The site passes the flood, road, slope and land-cover checks.`;
-      actions.push({ text, html: `<strong>Best health-centre location:</strong> ${escapeHtml(nearPlace(healthSite.site.properties.name))}. A 5 km catchment there would cover about ${fmt(healthSite.people)} people by 2030 (WorldPop projection) in ${plural(healthSite.settlementCount, "settlement")} that are now more than 5 km from care, and the site passes the flood, road, slope and land-cover checks. ${button("Compare top 3 sites", 'data-action="suggest" data-value="health" data-radius="5"')}` });
+    const healthSite = cachedSuggestion("health", 5);
+    if (healthSite === undefined) {
+      actions.push({ text: "Calculating the best health-centre location…", html: "<strong>Best health-centre location:</strong> calculating walking reach…" });
+    } else if (healthSite) {
+      const text = `Plan a new health centre ${nearPlace(healthSite.name)}: within a 5 km walk it would serve about ${fmt(healthSite.people)} people by 2030 in ${plural(healthSite.settlement_count, "settlement")} that are now more than a 5 km walk from care. The site passes the flood, road, slope and land-cover checks.`;
+      actions.push({ text, html: `<strong>Best health-centre location:</strong> ${escapeHtml(nearPlace(healthSite.name))}. Within a 5 km walk it would serve about ${fmt(healthSite.people)} people by 2030 (WorldPop projection) in ${plural(healthSite.settlement_count, "settlement")} that are now more than a 5 km walk from care, and the site passes the flood, road, slope and land-cover checks. ${button("Compare top 3 sites", 'data-action="suggest" data-value="health" data-radius="5"')}` });
     }
 
     const remote = active.settlements
@@ -1195,16 +1196,17 @@ async function init() {
       actions.push({ text, html: `<strong>Outreach until a facility is built:</strong> the largest settlements beyond 8 km are ${htmlList.join("; ")}.` });
     }
 
-    const schoolSite = computeSuggestedSites(active, "school", schoolRadiusKm, 1)[0];
-    const schoolGapPeople = computeSuggestedSites(active, "school", schoolRadiusKm, 50)
-      .reduce((sum, pick) => sum + pick.people, 0);
+    const schoolSite = cachedSuggestion("school", schoolRadiusKm);
+    const schoolGapPeople = active.settlements
+      .filter((settlement) => (nearestSchoolBySettlement.get(settlement)?.distance ?? Infinity) > schoolRadiusKm)
+      .reduce((sum, settlement) => sum + (Number(settlement.properties.population) || 0), 0);
     if (schoolSite && schoolGapPeople >= 1000) {
-      const text = `Assess a new school ${nearPlace(schoolSite.site.properties.name)}: it would bring about ${fmt(schoolSite.people)} people in ${plural(schoolSite.settlementCount, "settlement")} within ${schoolRadiusKm} km of a school.`;
-      actions.push({ text, html: `<strong>Best school location:</strong> ${escapeHtml(nearPlace(schoolSite.site.properties.name))}, bringing about ${fmt(schoolSite.people)} people in ${plural(schoolSite.settlementCount, "settlement")} within ${schoolRadiusKm} km of a school. ${button("Compare top 3 sites", `data-action="suggest" data-value="school" data-radius="${schoolRadiusKm}"`)}` });
+      const text = `Assess a new school ${nearPlace(schoolSite.name)}: it would bring about ${fmt(schoolSite.people)} people (2030) in ${plural(schoolSite.settlement_count, "settlement")} within a ${schoolRadiusKm} km walk of a school.`;
+      actions.push({ text, html: `<strong>Best school location:</strong> ${escapeHtml(nearPlace(schoolSite.name))}, bringing about ${fmt(schoolSite.people)} people (2030) in ${plural(schoolSite.settlement_count, "settlement")} within a ${schoolRadiusKm} km walk of a school. ${button("Compare top 3 sites", `data-action="suggest" data-value="school" data-radius="${schoolRadiusKm}"`)}` });
     } else {
       const text = schoolGapPeople > 0
-        ? `Only about ${fmt(schoolGapPeople)} people live more than ${schoolRadiusKm} km from a school, so new school sites are not the main gap here; direct education funds to classrooms, teachers and quality. Lower the School access radius to test a stricter standard.`
-        : `Every mapped settlement is within ${schoolRadiusKm} km of a school; direct education funds to classrooms, teachers and quality rather than new sites.`;
+        ? `Only about ${fmt(schoolGapPeople)} people in mapped settlements live more than a ${schoolRadiusKm} km walk from a school, so new school sites are not the main gap here; direct education funds to classrooms, teachers and quality. Lower the School access radius to test a stricter standard.`
+        : `Every mapped settlement is within a ${schoolRadiusKm} km walk of a school; direct education funds to classrooms, teachers and quality rather than new sites.`;
       actions.push({ text, html: `<strong>Schools:</strong> ${escapeHtml(text)}` });
     }
 
@@ -1277,9 +1279,14 @@ async function init() {
       : nearestFacilityBySettlement;
     let before = 0;
     let after = 0;
+    const walking = candidate.populationEstimate?.reached_settlements
+      ? new Map(candidate.populationEstimate.reached_settlements.map((row) => [row.index, row.walk_km]))
+      : null;
     active.settlements.forEach((settlement) => {
       const currentDistance = nearestService.get(settlement)?.distance ?? Infinity;
-      const candidateDistance = turf.distance(settlement, candidate.point, { units: "kilometers" });
+      const candidateDistance = walking
+        ? walking.get(settlementIndex.get(settlement)) ?? Infinity
+        : turf.distance(settlement, candidate.point, { units: "kilometers" });
       if (currentDistance <= candidate.radius) before += 1;
       if (Math.min(currentDistance, candidateDistance) <= candidate.radius) after += 1;
     });
@@ -1304,57 +1311,35 @@ async function init() {
   // whose radius brings the most not-yet-served residents within reach.
   // Demand = GRID3 settlements beyond the radius from every existing service of
   // that type (and from candidates already on the map).
-  function computeSuggestedSites(active, type, radiusKm, count = 3) {
-    const nearest = type === "school" ? nearestSchoolBySettlement : nearestFacilityBySettlement;
-    const existingCandidates = state.scenarios
-      .filter((candidate) => candidate.type === type)
-      .map((candidate) => candidate.point.geometry.coordinates);
-    // Demand is weighted by each settlement's projected 2030 population.
-    const residents = (settlement) => Number(settlement.properties.population_2030 ?? settlement.properties.population) || 0;
-    const demand = active.settlements.filter((settlement) => {
-      if (!(residents(settlement) > 0)) return false;
-      if ((nearest.get(settlement)?.distance ?? Infinity) <= radiusKm) return false;
-      const coords = settlement.geometry.coordinates;
-      return !existingCandidates.some((site) => quickKm(site, coords) <= radiusKm);
+  // Suggested sites: greedy maximal coverage on walking distance, calculated on
+  // the server. Results are cached per area, facility type and radius.
+  const suggestionCache = new Map();
+  const suggestionPending = new Set();
+  async function fetchSuggestedSites(type, radiusKm, count = 3, exclude = []) {
+    const response = await fetch("/api/suggest-sites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, radius_km: radiusKm, area: state.name || null, exclude, count }),
     });
-    if (!demand.length) return [];
-    // Candidate locations must pass the server's flood, road, slope and land-cover checks.
-    const reach = active.settlements.map((site) => {
-      if (site.properties.site_suitable === false) return [];
-      const origin = site.geometry.coordinates;
-      const covered = [];
-      demand.forEach((settlement, index) => {
-        if (quickKm(origin, settlement.geometry.coordinates) <= radiusKm) covered.push(index);
-      });
-      return covered;
-    });
-    const isCovered = new Array(demand.length).fill(false);
-    const picks = [];
-    for (let k = 0; k < count; k += 1) {
-      let best = null;
-      reach.forEach((covered, siteIndex) => {
-        let people = 0;
-        let settlementCount = 0;
-        covered.forEach((index) => {
-          if (isCovered[index]) return;
-          people += residents(demand[index]);
-          settlementCount += 1;
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Site suggestion failed (${response.status}).`);
+    return result.picks;
+  }
+  // Best single site for the briefing: undefined while calculating, null if none.
+  function cachedSuggestion(type, radiusKm) {
+    const key = `${state.name || ""}|${type}|${radiusKm}`;
+    if (suggestionCache.has(key)) return suggestionCache.get(key);
+    if (!suggestionPending.has(key)) {
+      suggestionPending.add(key);
+      fetchSuggestedSites(type, radiusKm, 1)
+        .then((picks) => suggestionCache.set(key, picks[0] || null))
+        .catch(() => suggestionCache.set(key, null))
+        .finally(() => {
+          suggestionPending.delete(key);
+          if (key.startsWith(`${state.name || ""}|`)) render(activeData());
         });
-        if (people > 0 && (!best || people > best.people)) best = { siteIndex, people, settlementCount };
-      });
-      if (!best) break;
-      const covered = reach[best.siteIndex].filter((index) => !isCovered[index]);
-      covered.forEach((index) => { isCovered[index] = true; });
-      const site = active.settlements[best.siteIndex];
-      picks.push({
-        site,
-        coordinates: site.geometry.coordinates,
-        people: best.people,
-        settlementCount: best.settlementCount,
-        settlements: covered.map((index) => demand[index]),
-      });
     }
-    return picks;
+    return undefined;
   }
 
   function nearestOf(features, coordinates) {
@@ -1457,14 +1442,25 @@ async function init() {
       const metrics = getScenarioMetrics(active, candidate);
       const color = scenarioColors[index % scenarioColors.length];
       const label = candidate.type === "school" ? "School" : "Health centre";
-      L.circle([lat, lon], {
-        radius: candidate.radius * 1000,
-        color,
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 0.1,
-        dashArray: "6 4",
-      }).addTo(layer);
+      // The shaded area is the real walking reach along roads and paths. Until
+      // it is calculated, a faint straight-line circle marks the radius.
+      const reachGeometry = candidate.populationEstimate?.walking_reach_geojson;
+      if (reachGeometry) {
+        L.geoJSON(reachGeometry, {
+          interactive: false,
+          style: { color, weight: 2, fillColor: color, fillOpacity: 0.14 },
+        }).addTo(layer);
+      } else {
+        L.circle([lat, lon], {
+          radius: candidate.radius * 1000,
+          interactive: false,
+          color,
+          weight: 1,
+          opacity: 0.6,
+          fill: false,
+          dashArray: "2 6",
+        }).addTo(layer);
+      }
       const marker = L.circleMarker([lat, lon], {
         radius: 8,
         color: "#10251f",
@@ -1482,7 +1478,9 @@ async function init() {
       const popupTitle = document.createElement("strong");
       popupTitle.textContent = `Candidate ${candidate.id} · ${label}`;
       const popupRadius = document.createElement("div");
-      popupRadius.textContent = `${candidate.radius} km straight-line radius`;
+      popupRadius.textContent = reachGeometry
+        ? `Shaded: within ${candidate.radius} km walking distance along roads and paths`
+        : `${candidate.radius} km walking radius (calculating the reachable area…)`;
       const occupancy = document.createElement("div");
       occupancy.textContent = candidate.siteScreening.buildings_available
         ? "No detected footprint contains the candidate point; this does not confirm the parcel is vacant."
@@ -1798,7 +1796,7 @@ async function init() {
     rows.push(["population", areaLabel, "WorldPop 2025 in unserved cells", Math.round(unservedPopulation)]);
     rows.push(["population", areaLabel, "share in unserved cells", totalPopulation ? `${(unservedPopulation / totalPopulation * 100).toFixed(1)}%` : ""]);
     rows.push(["source", areaLabel, "population dataset", "WorldPop 2025 R2025A v1; 100 m population-count raster; CC BY 4.0"]);
-    rows.push(["method", areaLabel, "population coverage", "Raster cells assigned to existing 3 km straight-line health-access classes; not network travel or school access"]);
+    rows.push(["method", areaLabel, "population coverage", "Raster cells assigned to the 3 km grid's health-access classes (walking distance along roads and paths from each cell's population centre); not school access"]);
     rows.push(["source", areaLabel, "health baseline", "Existing MOH facility dataset used to derive the 3 km access grid"]);
     rows.push(["source", areaLabel, "MHFR registry", "Malawi Health Facility Registry (zipatala.health.gov.mw), Ministry of Health; operational facilities; separate reference layer"]);
     rows.push([
@@ -1866,7 +1864,7 @@ async function init() {
       const school = nearestSchoolBySettlement.get(settlement);
       const facility = nearestFacilityBySettlement.get(settlement);
       rows.push([
-        "settlement", areaLabel, "nearest-service distances", "straight-line km",
+        "settlement", areaLabel, "nearest-service distances", "walking km along roads and paths",
         settlement.properties.name,
         settlement.properties.adm3_name,
         school?.school.properties.name || "",
@@ -1972,8 +1970,8 @@ async function init() {
             rows: [
               ["Residents 2025 (WorldPop)", Number(p.population || 0).toLocaleString()],
               ["Projected 2030", growthText(p)],
-              ["Nearest facility", distText],
-              ["Road travel time to care", formatMinutes(p.travel_min)],
+              ["Walking distance to nearest facility", distText],
+              ["Motorcycle travel time to care", formatMinutes(p.travel_min)],
               [`Residents within ${roadAccessKm} km of a classified road`, formatShare(p.road_access_share)],
               ["Area in 1-in-100-year flood zone", formatShare(p.flood_area_share)],
               [`Baseline score (${baselineWeightsLabel})`, p.priority_score],
@@ -2032,8 +2030,8 @@ async function init() {
           badge: { text: p.coverage, tone: p.coverage },
           rows: [
             ["Residents 2025 → 2030", `${Number(p.population || 0).toLocaleString()} → ${growthText(p)}`],
-            ["Nearest facility", p.dist_km == null ? "unavailable" : `${p.dist_km} km`],
-            ["Road travel time to care", formatMinutes(p.travel_min)],
+            ["Walking distance to nearest facility", p.dist_km == null ? "unavailable" : `${p.dist_km} km`],
+            ["Motorcycle travel time to care", formatMinutes(p.travel_min)],
             [`Within ${roadAccessKm} km of a classified road`, formatShare(p.road_access_share)],
             ["Area in flood zone", formatShare(p.flood_area_share)],
           ],
@@ -2061,6 +2059,31 @@ async function init() {
       row.addEventListener("click", () => map.setView([point[1], point[0]], 12));
       recBody.appendChild(row);
     });
+  }
+
+  // Area within a 5 km walk of a baseline health facility, calculated on the
+  // server along roads, tracks and paths. Loaded the first time the layer is shown.
+  let healthWalkingArea = null;
+  let healthWalkingAreaRequest = null;
+  function drawHealthWalkingArea() {
+    layers.buffers.clearLayers();
+    if (!healthWalkingArea?.geometry) return;
+    L.geoJSON(healthWalkingArea, {
+      interactive: false,
+      style: { color: "#2a9d8f", weight: 1.5, dashArray: "4 4", fillColor: "#2a9d8f", fillOpacity: 0.08 },
+    }).addTo(layers.buffers);
+  }
+  function loadHealthWalkingArea() {
+    if (healthWalkingArea || healthWalkingAreaRequest) return;
+    healthWalkingAreaRequest = fetch("/api/health-walking-area")
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+      .then((feature) => {
+        healthWalkingArea = feature;
+        drawHealthWalkingArea();
+      })
+      .catch(() => {
+        healthWalkingAreaRequest = null;
+      });
   }
 
   function render(active) {
@@ -2122,15 +2145,8 @@ async function init() {
           ],
         }), POPUP_OPTIONS)
         .addTo(layers.facilities);
-
-      L.circle([facility.lat, facility.lon], {
-        radius: 5000,
-        color: "#2a9d8f",
-        weight: 1,
-        fill: false,
-        dashArray: "4 4",
-      }).addTo(layers.buffers);
     });
+    drawHealthWalkingArea();
 
     active.schools.forEach((school) => {
       const [lon, lat] = school.geometry.coordinates;
@@ -2177,8 +2193,8 @@ async function init() {
               : "none mapped"],
           ],
           note: settlement.properties.source === "GRID3 v3.0"
-            ? "Settlement extent from GRID3 v3.0; the name is borrowed from the nearest OSM place. Distances are straight-line."
-            : "Distances are straight-line.",
+            ? "Settlement extent from GRID3 v3.0; the name is borrowed from the nearest OSM place. Distances are walking distances along roads and paths."
+            : "Distances are walking distances along roads and paths.",
           actions: [
             { action: "route-from", label: "Route from here", icon: "route", primary: true, data: { index: settlementIndex.get(settlement) } },
           ],
@@ -2243,7 +2259,7 @@ async function init() {
       kpi("Settlements", active.settlements.length),
       kpi(`Settlements within ${schoolRadiusKm} km of a school`, `${withinSchoolRadius}/${schoolDistances.length}`),
       kpi("Mean nearest-school distance", `${meanSchoolDistance.toFixed(1)} km`),
-      kpi("Settlements > 5 km from health", `${beyondHealthRadius}/${healthDistances.length}`),
+      kpi("Settlements > 5 km walk from health", `${beyondHealthRadius}/${healthDistances.length}`),
       kpi("Mean nearest-health distance", `${meanHealthDistance.toFixed(1)} km`),
       kpi("WorldPop 2025 estimate", Math.round(populationTotal).toLocaleString()),
       kpi("Population in unserved cells", `${Math.round(populationUnserved).toLocaleString()} · ${populationUnservedShare.toFixed(1)}%`),
@@ -2344,7 +2360,9 @@ async function init() {
     routeTotalDistance.textContent = `${choice.total_distance_km.toFixed(1)} km`;
     routeTravelTime.textContent = `~${estimatedTime}`;
     routeConnectors.textContent = `${connectorKm.toFixed(2)} km`;
-    routeStatus.textContent = `${choice.label}: ${settlement.properties.name} to ${facility.name}. Approximate time; excludes traffic, road conditions, and access time.`;
+    routeStatus.textContent = routeModeSelect.value === "walking"
+      ? `${choice.label}: ${settlement.properties.name} to ${facility.name}, on foot at 5 km/h along roads and paths. Excludes rests, terrain and river crossings.`
+      : `${choice.label}: ${settlement.properties.name} to ${facility.name}, by motorcycle or ambulance on mapped roads. Approximate time; excludes traffic, road conditions, and access time.`;
   }
 
   function clearRoute() {
@@ -2425,7 +2443,9 @@ async function init() {
     routeResultsPanel.hidden = true;
     routeOptionsContainer.replaceChildren();
     clearRouteMetrics();
-    routeControlStatus.textContent = "Calculating the shortest mapped-road route. The first request may take several seconds to prepare the road network.";
+    routeControlStatus.textContent = routeModeSelect.value === "walking"
+      ? "Calculating the shortest walking route along roads and paths…"
+      : "Calculating motorcycle / ambulance routes on mapped roads. The first request may take several seconds to prepare the road network.";
     findRouteButton.textContent = "Finding route...";
     findRouteButton.classList.add("is-loading");
     findRouteButton.setAttribute("aria-busy", "true");
@@ -2436,6 +2456,7 @@ async function init() {
         body: JSON.stringify({
           origin: settlement.geometry.coordinates,
           destination: [facility.lon, facility.lat],
+          mode: routeModeSelect.value,
         }),
       });
       let payload;
@@ -2532,9 +2553,26 @@ async function init() {
     updateFindRouteButton();
   };
   routeSettlementSelect.addEventListener("change", routeSelectionChanged);
+  routeModeSelect.addEventListener("change", () => {
+    if (routeChoices.length && !routeLoading) findRoute();
+  });
   routeFacilitySelect.addEventListener("change", routeSelectionChanged);
   findRouteButton.addEventListener("click", findRoute);
   clearRouteButton.addEventListener("click", clearRoute);
+  // The route card has its own Clear and Hide buttons, so it never traps the user.
+  const routeResultsToggle = document.getElementById("toggle-route-results");
+  function setRouteResultsCollapsed(collapsed) {
+    routeResultsPanel.classList.toggle("collapsed", collapsed);
+    routeResultsToggle.textContent = collapsed ? "Show" : "Hide";
+    routeResultsToggle.setAttribute("aria-expanded", String(!collapsed));
+    routeResultsToggle.title = collapsed ? "Show the route comparison" : "Minimise the route comparison";
+  }
+  routeResultsToggle.addEventListener("click", () =>
+    setRouteResultsCollapsed(!routeResultsPanel.classList.contains("collapsed")));
+  document.getElementById("close-route-results").addEventListener("click", clearRoute);
+  new MutationObserver(() => {
+    if (!routeResultsPanel.hidden) setRouteResultsCollapsed(false);
+  }).observe(routeResultsPanel, { attributes: true, attributeFilter: ["hidden"] });
   placeScenarioButton.addEventListener("click", () => {
     state.placingScenario = !state.placingScenario;
     placeScenarioButton.textContent = state.placingScenario
@@ -2716,18 +2754,30 @@ async function init() {
       return;
     }
     const label = siteType === "school" ? "school" : "health centre";
-    const picks = computeSuggestedSites(activeData(), siteType, radiusKm, 3);
+    suggestSitesButton.disabled = true;
+    suggestSitesButton.classList.add("is-loading");
+    showScenarioNotice("Finding best sites", `Calculating walking reach for ${label} locations…`, "warning", false);
+    let picks;
+    try {
+      picks = await fetchSuggestedSites(siteType, radiusKm, 3, state.scenarios
+        .filter((candidate) => candidate.type === siteType)
+        .map((candidate) => candidate.point.geometry.coordinates));
+    } catch (error) {
+      suggestSitesButton.disabled = false;
+      suggestSitesButton.classList.remove("is-loading");
+      showScenarioNotice("Suggestions unavailable", error.message, "error", true);
+      return;
+    }
     if (!picks.length) {
-      const message = `Every populated settlement in ${state.name || "Dedza"} is already within ${radiusKm} km of a ${siteType === "school" ? "school" : "baseline health facility"} or a candidate site.`;
+      suggestSitesButton.disabled = false;
+      suggestSitesButton.classList.remove("is-loading");
+      const message = `Every populated settlement in ${state.name || "Dedza"} is already within ${radiusKm} km walking distance of a ${siteType === "school" ? "school" : "health facility"} or a candidate site.`;
       scenarioStatus.textContent = message;
       showScenarioNotice("No coverage gap at this radius", message, "success", true);
       return;
     }
-    suggestSitesButton.disabled = true;
-    suggestSitesButton.classList.add("is-loading");
     state.placingScenario = false;
     placeScenarioButton.textContent = state.scenarios.length ? "Add another site" : "Add site on map";
-    showScenarioNotice("Finding best sites", `Searching ${picks.length} ${label} locations that reach the most unserved people…`, "warning", false);
     const added = [];
     try {
       for (const pick of picks) {
@@ -2741,9 +2791,9 @@ async function init() {
           siteScreening: open.siteScreening,
           loading: true,
           suggestion: {
-            name: pick.site.properties.name,
+            name: pick.name,
             people: pick.people,
-            settlementCount: pick.settlementCount,
+            settlementCount: pick.settlement_count,
           },
         };
         state.scenarios.push(candidate);
@@ -2763,7 +2813,7 @@ async function init() {
     state.scenarioResultsCollapsed = false;
     placeScenarioButton.textContent = "Add another site";
     const totalPeople = added.reduce((sum, candidate) => sum + candidate.suggestion.people, 0);
-    const message = `${added.length} suggested ${label} site${added.length === 1 ? "" : "s"} added. Each passes the flood, road, slope and land-cover checks; together they could bring about ${Math.round(totalPeople).toLocaleString()} people in mapped settlements (2030 projection) within ${radiusKm} km. Estimating full reach…`;
+    const message = `${added.length} suggested ${label} site${added.length === 1 ? "" : "s"} added. Each passes the flood, road, slope and land-cover checks; together they could bring about ${Math.round(totalPeople).toLocaleString()} people in mapped settlements (2030 projection) within ${radiusKm} km walking distance. Estimating full reach…`;
     scenarioStatus.textContent = message;
     showScenarioNotice("Suggested sites added", message, "success", true);
     render(activeData());
@@ -2911,8 +2961,8 @@ async function init() {
   const scales = priorityScenario.scales;
   document.getElementById("method-priority").textContent =
     `The priority score combines WorldPop's 2030 projected residents per cell (full score at ${Math.round(scales.population_full).toLocaleString()}, ` +
-    `the 75th percentile of cells), residents added 2025–2030 (full score at ${Math.round(scales.growth_full).toLocaleString()}), ` +
-    `straight-line distance to the nearest facility (full score at ${scales.distance_full_m / 1000} km), the share of residents within ${roadAccessKm} km ` +
+    `the ${ordinal(Math.round((scales.full_score_percentile ?? 0.9) * 100))} percentile of cells), residents added 2025–2030 (full score at ${Math.round(scales.growth_full).toLocaleString()}), ` +
+    `walking distance along roads and paths to the nearest facility (full score at ${scales.distance_full_m / 1000} km), the share of residents within ${roadAccessKm} km ` +
     `of a classified road, and the share of the cell outside the JRC 1-in-100-year flood zone (baseline ${baselineWeightsText}; adjustable under Priority weights). ` +
     `Served cells are multiplied by ${scales.served_multiplier}, and border slivers under ${priorityScenario.min_ranked_cell_km2} km² are scored but not ranked. ` +
     `WorldPop projects similar growth rates across most cells, so growth mostly follows where people already live.`;
@@ -3036,6 +3086,9 @@ async function init() {
   bind("lyr-schools", layers.schools);
   bind("lyr-settlements", layers.settlements);
   bind("lyr-buffers", layers.buffers);
+  document.getElementById("lyr-buffers").addEventListener("change", (ev) => {
+    if (ev.target.checked) loadHealthWalkingArea();
+  });
   bind("lyr-roads", layers.roads);
   bind("lyr-water", layers.water);
   bind("lyr-priority", layers.priority);
@@ -3079,6 +3132,7 @@ function openTool(name) {
   });
   toolPanelTitle.textContent = view.dataset.title;
   toolPanel.hidden = false;
+  document.body.classList.add("tool-open");
   if (switching) toolPanelBody.scrollTop = 0;
   storeSetting(TOOL_KEY, name);
 }
@@ -3086,6 +3140,7 @@ function openTool(name) {
 function closeTool() {
   activeTool = null;
   toolPanel.hidden = true;
+  document.body.classList.remove("tool-open");
   toolButtons.forEach((button) => {
     button.classList.remove("active");
     button.setAttribute("aria-expanded", "false");

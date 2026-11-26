@@ -18,7 +18,7 @@ from scripts.planning_analysis import (  # noqa: E402
     ROAD_ACCESS_KM,
     cell_indicators,
     planning_grids,
-    travel_minutes_to_care,
+    network_access,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,15 +32,17 @@ ADM2 = RAW / "MWI_ADM2_simplified.geojson"
 # table (the app reads them from there). Every criterion is scaled 0-1:
 #   population - residents projected for 2030 (demand the facility must serve)
 #   growth     - residents added 2025-2030 (supports the growing population)
-#   distance   - straight-line distance to the nearest facility (need)
+#   distance   - walking distance along roads and paths to the nearest facility (need)
 #   road       - share of residents within ROAD_ACCESS_KM of a classified road
 #   flood      - share of the cell outside the 1-in-100-year flood zone
 PRIORITY_WEIGHTS = {"population": 0.30, "growth": 0.15, "distance": 0.30, "road": 0.15, "flood": 0.10}
 # Population and growth reach a full score at this percentile of the cells, so
-# the scale comes from the data rather than a fixed number.
-FULL_SCORE_PERCENTILE = 0.75
-# Distance reaches a full score at the "unserved" threshold (8 km).
-DISTANCE_FULL_M = 8000.0
+# the scale comes from the data rather than a fixed number. The 90th percentile
+# keeps the most populated cells distinguishable from each other.
+FULL_SCORE_PERCENTILE = 0.9
+# Walking distance reaches a full score at 12 km (about 2.4 hours on foot), so
+# cells beyond the 8 km "unserved" threshold are still ranked by how far they are.
+DISTANCE_FULL_M = 12000.0
 SERVED_MULTIPLIER = 0.35
 
 # Facilities in neighbouring districts within this distance of the boundary are
@@ -221,7 +223,9 @@ def main() -> None:
     con.execute(
         """
         CREATE OR REPLACE TABLE facilities_access AS
-        SELECT f.name, ST_Point(f.lon, f.lat) AS geom
+        SELECT f.name, f.lon, f.lat,
+               ST_Intersects(ST_Point(f.lon, f.lat), d.geom) AS in_dedza,
+               ST_Point(f.lon, f.lat) AS geom
         FROM facilities_all f, dedza d
         WHERE f.lon IS NOT NULL AND f.lat IS NOT NULL
           AND (
@@ -364,29 +368,34 @@ def main() -> None:
     grids = planning_grids(json.loads(boundary_geojson))
     indicators = cell_indicators(grids, [(cid, gj) for cid, gj, _, _ in cell_rows_geo], road_buffer)
 
-    print("Road travel time from each cell's population centre to the nearest facility...")
+    print("Walking distance and vehicle travel time from each cell's population centre to care...")
     origins = {
         int(cid): indicators[int(cid)]["pop_centre"] or (lon, lat)
         for cid, _, lon, lat in cell_rows_geo
     }
-    travel = travel_minutes_to_care(
-        origins, con.execute("SELECT ST_X(geom), ST_Y(geom) FROM facilities_access").fetchall()
+    access = network_access(
+        origins,
+        con.execute("SELECT ST_X(geom), ST_Y(geom) FROM facilities_access").fetchall(),
+        PROCESSED / "clip.duckdb",
     )
     con.execute(
         """
         CREATE OR REPLACE TABLE cell_planning (
             cell_id BIGINT, population_2020 DOUBLE, population DOUBLE, population_2030 DOUBLE,
             road_access_share DOUBLE, flood_area_share DOUBLE, flood_pop_share DOUBLE,
-            travel_min DOUBLE
+            travel_min DOUBLE, walk_m DOUBLE, origin_lon DOUBLE, origin_lat DOUBLE
         )
         """
     )
     con.executemany(
-        "INSERT INTO cell_planning VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO cell_planning VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 cid, v["population_2020"], v["population"], v["population_2030"],
-                v["road_access_share"], v["flood_area_share"], v["flood_pop_share"], travel[cid],
+                v["road_access_share"], v["flood_area_share"], v["flood_pop_share"],
+                access[cid]["vehicle_min"],
+                None if access[cid]["walk_km"] is None else access[cid]["walk_km"] * 1000,
+                origins[cid][0], origins[cid][1],
             )
             for cid, v in indicators.items()
         ],
@@ -400,12 +409,15 @@ def main() -> None:
         """
         CREATE OR REPLACE TABLE cell_stats AS
         WITH fac_dist AS (
+            -- Straight-line distance from the same population centre that the
+            -- walking distance starts from, kept for comparison.
             SELECT c.cell_id,
                    MIN(ST_Distance(
-                        ST_Transform(c.centroid, 'EPSG:4326', 'EPSG:32736'),
+                        ST_Transform(ST_Point(p.origin_lon, p.origin_lat), 'EPSG:4326', 'EPSG:32736'),
                         ST_Transform(f.geom, 'EPSG:4326', 'EPSG:32736')
-                   )) AS dist_facility_m
+                   )) AS straight_dist_m
             FROM cells c
+            JOIN cell_planning p USING (cell_id)
             CROSS JOIN facilities_access f
             GROUP BY c.cell_id
         ),
@@ -439,7 +451,10 @@ def main() -> None:
             c.area_km2,
             ST_X(c.centroid) AS lon,
             ST_Y(c.centroid) AS lat,
-            f.dist_facility_m,
+            -- Walking distance along roads and paths; straight line only if the
+            -- population centre is on a fragment not connected to any facility.
+            COALESCE(p.walk_m, f.straight_dist_m) AS dist_facility_m,
+            f.straight_dist_m,
             COALESCE(r.road_km, 0) AS road_km,
             COALESCE(w.water_km, 0) AS water_km,
             COALESCE(fc.facilities_in_cell, 0) AS facilities_in_cell,
@@ -565,6 +580,7 @@ def main() -> None:
             lat REAL,
             area_km2 REAL,
             dist_facility_m REAL,
+            straight_dist_m REAL,
             road_km REAL,
             water_km REAL,
             facilities_in_cell INTEGER,
@@ -602,6 +618,13 @@ def main() -> None:
             name TEXT,
             geojson TEXT
         );
+        CREATE TABLE distance_facilities (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            lon REAL,
+            lat REAL,
+            in_dedza INTEGER
+        );
         """
     )
 
@@ -610,6 +633,10 @@ def main() -> None:
         ("Dedza", json.dumps(json.loads(boundary_geojson))),
     )
 
+    cur.executemany(
+        "INSERT INTO distance_facilities (name, lon, lat, in_dedza) VALUES (?, ?, ?, ?)",
+        con.execute("SELECT name, lon, lat, in_dedza FROM facilities_access ORDER BY name").fetchall(),
+    )
     fac_rows = con.execute("SELECT name, owner, dho, uid, lon, lat FROM facilities").fetchall()
     for name, owner, dho, uid, lon, lat in fac_rows:
         cur.execute(
@@ -648,7 +675,7 @@ def main() -> None:
     print("Waterways stored:", cur.execute("SELECT COUNT(*) FROM waterways").fetchone()[0])
 
     cell_columns = (
-        "cell_id", "lon", "lat", "area_km2", "dist_facility_m", "road_km", "water_km",
+        "cell_id", "lon", "lat", "area_km2", "dist_facility_m", "straight_dist_m", "road_km", "water_km",
         "facilities_in_cell", "population_2020", "population", "population_2030", "growth",
         "road_access_share", "flood_area_share", "flood_pop_share", "travel_min",
         "coverage", "road_access", "water_access", "priority_score",
@@ -743,6 +770,11 @@ def main() -> None:
         "n_facilities_for_distance": str(n_access),
         "cross_border_km": f"{cross_border_m / 1000:g}",
         "min_ranked_cell_km2": f"{MIN_RANKED_CELL_KM2:g}",
+        "distance_method": (
+            "walking network distance along OSM roads, tracks and paths from each cell's "
+            "population centre to the nearest facility (straight walk to the nearest path node)"
+        ),
+        "walking_speed_kmh": "5",
         **{f"weight_{key}": f"{value * 100:g}" for key, value in PRIORITY_WEIGHTS.items()},
         "full_score_percentile": f"{FULL_SCORE_PERCENTILE:g}",
         "population_full_score": f"{pop_full:.1f}",
