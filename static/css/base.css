@@ -1,0 +1,143 @@
+/* ==========================================================================
+   Base: design tokens, page defaults, typography, shared button behaviour
+   ========================================================================== */
+
+:root {
+  /* Colours */
+  --bg: #0c293a;
+  --panel: #123c57;
+  --panel-raised: #1c4b64;
+  --surface: #12364f;
+  --surface-hover: #174260;
+  --deck: #0a2131;
+  --ink: #fffaf0;
+  --muted: #c0ced6;
+  --line: #31566b;
+  --line-soft: rgba(255, 255, 255, 0.09);
+  --accent: #f4c542;
+  --accent-soft: #ffe08a;
+  --served: #2a9d8f;
+  --underserved: #e9c46a;
+  --unserved: #e76f51;
+  --water: #4ea8de;
+
+  /* Light cards that float over the map (results, popups, dropdowns) */
+  --results-panel-border: var(--accent);
+  --results-panel-bg: var(--ink);
+  --results-panel-header: var(--panel);
+  --results-panel-summary: var(--accent-soft);
+  --results-panel-card: #fff;
+  --results-panel-line: #c3d0d8;
+  --results-panel-ink: #111820;
+  --results-panel-muted: #263746;
+
+  /* Type */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Shape and depth */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --pill: 999px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.14);
+  --shadow-2: 0 12px 32px rgba(3, 14, 22, 0.42);
+  --ring: 0 0 0 3px rgba(244, 197, 66, 0.35);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: rgba(244, 197, 66, 0.35); }
+
+/* Numbers line up in columns */
+.kpi b, .briefing-kpi strong, td, output, .gap-analysis-row strong,
+.population-row strong, .threshold-row b, .route-map-metrics strong { font-variant-numeric: tabular-nums; }
+
+/* ---- Typography ---- */
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); }
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.lede, .footnote, .table-wrap p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.lede { margin: 0 0 12px; font-size: 12.5px; }
+.footnote { margin: 4px 0 0; padding: 0; font-size: 11px; }
+label { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 14px; }
+
+/* ---- Native selects (hidden behind the custom dropdown, see controls.css) ---- */
+select { color-scheme: light; }
+select option {
+  background: var(--results-panel-bg);
+  color: var(--results-panel-ink);
+}
+select option:checked,
+select option:hover {
+  background: var(--accent-soft);
+  color: var(--results-panel-ink);
+}
+
+/* ---- Buttons: press feedback, focus ring, pill shape ---- */
+button { transition: background-color 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.08s; }
+button:not(:disabled):active { transform: translateY(1px) scale(0.98); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Buttons and single-line inputs share one pill shape. Tool-rail tiles and the
+   Traditional Authority controls (see shell.css) keep their own shapes. */
+button:not(.tool-button),
+.custom-select-search input,
+.panel input[type="number"],
+.panel input[type="text"],
+.panel input[type="search"],
+.panel select {
+  border-radius: var(--pill);
+}
+
+/* ---- Icons: <button data-icon="name"> draws a masked SVG before the label ---- */
+[data-icon] { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+[data-icon]::before {
+  content: "";
+  flex: none;
+  width: 14px;
+  height: 14px;
+  background-color: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat;
+  mask: var(--icon) center / contain no-repeat;
+}
+[data-icon=""]::before { display: none; }
+[data-icon="route"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='19' r='2.5'/%3E%3Ccircle cx='18' cy='5' r='2.5'/%3E%3Cpath d='M6 16.5V11a4 4 0 0 1 4-4h5.5'/%3E%3C/svg%3E"); }
+[data-icon="pin"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z'/%3E%3Ccircle cx='12' cy='10' r='2.3'/%3E%3C/svg%3E"); }
+[data-icon="clear"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E"); }
+[data-icon="reset"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 12a8.5 8.5 0 1 0 2.6-6.1L3.5 8.5'/%3E%3Cpath d='M3.5 3.5v5h5'/%3E%3C/svg%3E"); }
+[data-icon="download"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4v11M7 10l5 5 5-5M5 20h14'/%3E%3C/svg%3E"); }
+[data-icon="print"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 9V3h10v6M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2'/%3E%3Cpath d='M7 14h10v7H7z'/%3E%3C/svg%3E"); }
+[data-icon="spark"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z'/%3E%3C/svg%3E"); }
+[data-icon="zoom"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='M20 20l-4.6-4.6M10.5 7.5v6M7.5 10.5h6'/%3E%3C/svg%3E"); }
+/* While a request runs, the icon becomes a spinner. */
+.is-loading[data-icon]::before {
+  -webkit-mask: none;
+  mask: none;
+  background: none;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: dd-spin 0.75s linear infinite;
+}
+
+@keyframes dd-spin { to { transform: rotate(360deg); } }
+@keyframes dd-pop-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }

@@ -1,0 +1,254 @@
+/* ==========================================================================
+   App shell: top bar, area picker, tool rail, floating tool panel, map area
+   ========================================================================== */
+
+/* ---- Top bar ---- */
+.topbar {
+  position: relative;
+  z-index: 1100;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 24px;
+  min-height: 54px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  background: linear-gradient(180deg, #10344c 0%, #0c2a3d 100%);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+.brand { display: flex; flex: none; align-items: center; gap: 10px; margin: 0; }
+.brand-mark {
+  display: grid;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #f7d36b 0%, #f4c542 45%, #e9965a 100%);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  color: #0c2a3d;
+}
+.brand-mark svg { width: 19px; height: 19px; }
+.topbar h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+}
+.topbar .eyebrow { margin: 2px 0 0; color: var(--muted); font-size: 11px; letter-spacing: 0.02em; text-transform: none; }
+
+/* ---- Area picker: Traditional Authority search + District button ---- */
+.topbar .area-control {
+  position: relative;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: auto minmax(220px, 340px) minmax(0, 260px);
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+}
+.area-control > label {
+  display: block;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.area-status { min-height: 0; margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.topbar .area-status {
+  overflow: hidden;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ta-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+/* The TA list spans the full control width (over the District button) so names fit. */
+.ta-control .custom-select-popover { right: auto; width: calc(100% + 92px); }
+
+/* District button and TA search box: same 8px corners and translucent fill,
+   instead of the global pill shape. */
+.ta-control > #clear-ta {
+  min-width: 84px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ta-control > #clear-ta:hover { border-color: var(--accent); background: rgba(244, 197, 66, 0.14); color: var(--ink); }
+.ta-control > #clear-ta[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--results-panel-ink); }
+
+.area-control .ta-control button.custom-select-trigger {
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.area-control .ta-control button.custom-select-trigger:hover:not(:disabled) { border-color: var(--accent); background: rgba(244, 197, 66, 0.14); box-shadow: none; }
+.area-control .ta-control .custom-select.is-open button.custom-select-trigger { border-color: var(--accent); }
+/* Empty TA box reads as a search field: magnifier icon before the prompt text. */
+.area-control .ta-control button.custom-select-trigger.is-placeholder { color: #fff; font-weight: 600; }
+.area-control .ta-control button.custom-select-trigger.is-placeholder::before {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  background: currentColor;
+  content: "";
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.area-control .ta-control button.custom-select-trigger.is-placeholder .custom-select-value { flex: 1 1 auto; }
+
+/* ---- Workspace: tool rail + map and insights drawer ---- */
+.workspace {
+  position: relative;
+  display: grid;
+  flex: 1;
+  grid-template-columns: 78px minmax(0, 1fr);
+  min-height: 0;
+}
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#map { position: relative; flex: 1 1 auto; min-height: 0; background: #dfe6e9; }
+
+/* ---- Tool rail ---- */
+.tool-rail {
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 7px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line-soft);
+  background: var(--deck);
+  scrollbar-width: none;
+}
+.tool-button {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 10px 2px 8px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--muted);
+  font: 600 10.5px/1.15 var(--font-ui);
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.tool-button svg { width: 22px; height: 22px; }
+.tool-button:hover { background: rgba(255, 255, 255, 0.06); color: var(--ink); }
+.tool-button.active { background: rgba(244, 197, 66, 0.16); color: var(--accent); }
+.tool-button.active::before {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: -7px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+  content: "";
+}
+.tool-button:focus-visible { outline: none; box-shadow: var(--ring); }
+
+/* ---- Floating tool panel over the map ---- */
+.panel.tool-panel {
+  position: absolute;
+  top: 12px;
+  left: 90px;
+  z-index: 950;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-height: calc(100% - 24px - var(--deck-height, 0px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  background: rgba(12, 41, 58, 0.97);
+  box-shadow: var(--shadow-2);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  animation: tool-panel-in 0.16s ease-out;
+}
+.panel.tool-panel[hidden] { display: none; }
+@keyframes tool-panel-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: none; }
+}
+.tool-panel-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 10px 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.tool-panel-header h2 {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.icon-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.icon-button:hover { background: rgba(255, 255, 255, 0.08); color: var(--ink); }
+.icon-button:focus-visible { outline: none; box-shadow: var(--ring); }
+.tool-panel-body {
+  padding: 12px 14px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* One view per tool. Its first section sits flush; later sections are cards. */
+.tool-view[hidden] { display: none; }
+.tool-view > section {
+  margin: 0 0 10px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.tool-view > section:first-child { padding: 0; border: 0; background: transparent; }
+.tool-view > section:first-child > h2 { display: none; }
+.tool-view > section > h2 { margin: 0 0 8px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; }

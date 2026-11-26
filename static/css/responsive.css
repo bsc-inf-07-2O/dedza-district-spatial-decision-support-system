@@ -1,0 +1,65 @@
+/* ==========================================================================
+   Screen-size and motion adjustments (loaded after all component styles)
+   ========================================================================== */
+
+/* ---- Desktop: keep map cards and controls clear of the open tool panel ---- */
+@media (min-width: 901px) {
+  /* Open tool panel: 360 px wide, 12 px from the map edge. */
+  body.tool-open .map-route-results { left: 384px; width: min(370px, calc(100% - 396px)); }
+  body.tool-open .leaflet-top.leaflet-left { left: 372px; }
+}
+
+/* ---- Tablets and phones: bottom navigation and bottom-sheet panels ---- */
+@media (max-width: 900px) {
+  .topbar { flex-wrap: wrap; gap: 8px; }
+  .topbar .eyebrow { display: none; }
+  .topbar .area-control { grid-template-columns: minmax(0, 1fr); width: 100%; margin: 0; }
+  .topbar .area-control > label, .topbar .area-status { display: none; }
+
+  .workspace { grid-template-columns: minmax(0, 1fr); padding-bottom: 64px; }
+  .tool-rail {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    flex-direction: row;
+    gap: 2px;
+    height: 64px;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-top: 1px solid var(--line-soft);
+    border-right: 0;
+  }
+  .tool-button { flex: 1 0 64px; padding: 6px 2px; }
+  .tool-button.active::before { top: -6px; bottom: auto; left: 16px; right: 16px; width: auto; height: 3px; border-radius: 0 0 3px 3px; }
+  .panel.tool-panel {
+    top: auto;
+    right: 8px;
+    bottom: calc(8px + var(--deck-height, 0px));
+    left: 8px;
+    z-index: 1200;
+    width: auto;
+    max-height: min(62vh, calc(100% - 16px - var(--deck-height, 0px)));
+    animation-name: tool-sheet-in;
+  }
+
+  .scenario-notice { top: 8px; width: min(370px, calc(100% - 16px)); }
+  .map-route-results { bottom: 8px; left: 8px; width: min(350px, calc(100% - 16px)); max-height: calc(100% - 16px); }
+  .map-scenario-results { top: 8px; right: 8px; width: min(340px, calc(100% - 16px)); max-height: calc(100vh - 104px); }
+
+  .analysis-deck { height: var(--deck-size, 36vh); }
+  .deck-resizer { top: -8px; height: 16px; }
+  .deck-toggle-label { display: none; }
+  .briefing-columns { grid-template-columns: 1fr; gap: 8px; }
+}
+@keyframes tool-sheet-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .custom-select-popover, .scenario-notice, .panel.tool-panel { animation: none; }
+  .is-loading[data-icon]::before { animation-duration: 2s; }
+  .analysis-deck { transition: none; }
+}

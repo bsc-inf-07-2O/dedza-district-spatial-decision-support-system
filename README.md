@@ -16,6 +16,47 @@ python app.py
 
 Open http://127.0.0.1:5000 and leave the terminal running. On first TA-boundary load, DuckDB may need internet access to install its spatial extension.
 
+## Project structure
+
+```
+app.py                  Starts the Flask app (python app.py)
+sdss/                   Backend package
+  config.py             File paths and fixed settings
+  geo.py                Coordinate helpers
+  data.py               SQLite database, cached map layers, site checks
+  routing.py            Road network graph, shortest paths, route options
+  walking.py            Walking distance to services along roads and paths
+  scenario.py           Population and road-time estimates for a candidate site
+  planning.py           Per-settlement planning figures, priority scales, suggested sites
+  tiles.py              PNG map tiles for the environmental rasters
+  routes/               API endpoints (Flask blueprints)
+    layers.py           Map data: boundaries, facilities, schools, settlements, tiles
+    analysis.py         Summaries, health-gap thresholds, priority scoring
+    sites.py            Routing and candidate-site tools
+scripts/                Data import and database build scripts
+static/
+  index.html            The page
+  css/                  Styles, loaded in this order:
+    base.css            Colours, fonts, buttons, icons
+    shell.css           Top bar, tool rail, tool panel
+    controls.css        Inputs, dropdowns, sliders, layer switches
+    map.css             Map controls, legend, markers, popups, notifications
+    results.css         Candidate-site and route cards over the map
+    insights.css        Insights drawer: tabs, tables, briefing
+    responsive.css      Tablet and phone layout
+    print.css           Print / Save PDF
+  js/                   Frontend (ES modules, no build step)
+    main.js             Entry point
+    app.js              Start-up order
+    data.js, state.js   Loaded data and the user's current choices
+    map/map.js          Leaflet map, layers, legend
+    ui/                 Reusable widgets (dropdown, popups, notifications, shell)
+    features/           One file per tool or panel (routes, sites, gap, priority, ...)
+tests/                  pytest suite (python -m pytest)
+```
+
+Each module starts with a comment saying what it does. A new API endpoint goes in the matching file under `sdss/routes/`; a new tool usually needs a `static/js/features/` module, wired up in `static/js/app.js`.
+
 Import the reference layers after the main database exists (in this order):
 
 ```powershell

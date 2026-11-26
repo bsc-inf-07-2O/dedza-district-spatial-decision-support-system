@@ -1,0 +1,18 @@
+/* ==========================================================================
+   Print / Save PDF: only the active insights panel (loaded last)
+   ========================================================================== */
+
+@media print {
+  body { height: auto; overflow: visible; background: #fff; color: #111; }
+  .topbar, .tool-rail, .tool-panel, .deck-toggle { display: none !important; }
+  .analysis-tabs, #map, .inline-action { display: none; }
+  .workspace { display: block; }
+  .analysis-deck { display: block; max-height: none; border: 0; }
+  .analysis-panel[hidden] { display: none !important; }
+  .analysis-panel.active { display: block; }
+  .analysis-deck.collapsed .analysis-panel.active { display: block !important; }
+  .briefing-panel { overflow: visible; }
+  .table-wrap { background: #fff; color: #111; }
+  th, td { border-color: #bbb; }
+  th { color: #111; }
+}

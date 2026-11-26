@@ -4,23 +4,15 @@ import sqlite3
 import numpy as np
 import pytest
 import rasterio
-import app as app_module
 from rasterio.transform import from_origin
 
-from app import (
-    app,
-    building_at,
-    calculate_road_route,
-    db,
-    point_in_geometry,
-    estimate_scenario_road_access,
-    haversine_km,
-    load_payloads,
-    motorcycle_speed_kmh,
-    project_road_node,
-    scenario_baseline_road_times,
-    shortest_road_time_to_target,
-)
+from app import app
+from scripts.road_network import haversine_km, motorcycle_speed_kmh
+from scripts.site_constraints import point_in_geometry
+from sdss import config, routing, walking
+from sdss.data import building_at, db, load_payloads
+from sdss.routing import calculate_road_route, project_road_node, shortest_road_time_to_target
+from sdss.scenario import estimate_scenario_road_access, scenario_baseline_road_times
 
 
 @pytest.fixture
@@ -78,7 +70,7 @@ def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypa
     ) as dataset:
         dataset.write(np.array([[10, 40], [50, 80]], dtype=np.uint8), 1)
     monkeypatch.setattr(
-        app_module,
+        config,
         "ENVIRONMENTAL_RASTER_PATHS",
         {
             "land_cover": raster_path,
@@ -87,7 +79,7 @@ def test_environmental_layer_status_and_tile_endpoint(client, tmp_path, monkeypa
         },
     )
     monkeypatch.setattr(
-        app_module, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite"
+        config, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite"
     )
 
     status = client.get("/api/site-layers").get_json()
@@ -106,7 +98,7 @@ def test_environmental_tile_rejects_invalid_zoom(client, tmp_path, monkeypatch):
     raster_path = tmp_path / "land_cover.tif"
     raster_path.touch()
     monkeypatch.setattr(
-        app_module,
+        config,
         "ENVIRONMENTAL_RASTER_PATHS",
         {
             "land_cover": raster_path,
@@ -151,7 +143,7 @@ def test_gap_analysis_reclassifies_cells_and_aggregates_in_sql(
     )
     con.commit()
     con.close()
-    monkeypatch.setattr(app_module, "DB_PATH", database_path)
+    monkeypatch.setattr(config, "DB_PATH", database_path)
 
     response = client.get("/api/gap-analysis?served_km=3&underserved_km=8")
 
@@ -362,7 +354,7 @@ def test_route_estimate_returns_distance_time_and_alternative_choices(monkeypatc
     coordinates = {node: node for node in graph}
     projected = {node: project_road_node(node) for node in graph}
     monkeypatch.setattr(
-        "app.load_road_network",
+        "sdss.routing.load_road_network",
         lambda *_args, **_kwargs: (graph, coordinates, projected),
     )
 
@@ -403,11 +395,11 @@ def test_road_time_search_honors_direction_and_time_limit():
     assert shortest_road_time_to_target(graph, target, start, 60) is None
 
     # The multi-source search used for scenarios gives the same directed times.
-    times = app_module.road_times_to_sources(graph, {target}, 60)
+    times = routing.road_times_to_sources(graph, {target}, 60)
     assert times[start] == pytest.approx(35)
     assert times[middle] == pytest.approx(15)
-    assert app_module.road_times_to_sources(graph, {target}, 30).get(start) is None
-    assert app_module.road_times_to_sources(graph, {start}, 60).get(target) is None
+    assert routing.road_times_to_sources(graph, {target}, 30).get(start) is None
+    assert routing.road_times_to_sources(graph, {start}, 60).get(target) is None
 
 
 def test_scenario_road_access_compares_candidate_with_existing_service(monkeypatch):
@@ -434,10 +426,10 @@ def test_scenario_road_access_compares_candidate_with_existing_service(monkeypat
         ],
     }
     projected = {node: project_road_node(node) for node in graph}
-    monkeypatch.setattr("app.load_payloads", lambda: payloads)
-    monkeypatch.setattr("app.load_road_network", lambda *_args, **_kwargs: (graph, {node: node for node in graph}, projected))
+    monkeypatch.setattr("sdss.scenario.load_payloads", lambda: payloads)
+    monkeypatch.setattr("sdss.scenario.load_road_network", lambda *_args, **_kwargs: (graph, {node: node for node in graph}, projected))
     monkeypatch.setattr(
-        "app.nearest_road_node",
+        "sdss.scenario.nearest_road_node",
         lambda point, _projected: node_by_point[point],
     )
     scenario_baseline_road_times.cache_clear()
@@ -619,7 +611,7 @@ def test_site_screening_blocks_candidate_inside_detected_building(client, tmp_pa
     point = _unserved_cell_point()
     constraints_path = tmp_path / "site_constraints.sqlite"
     _write_site_constraints(constraints_path, point)
-    monkeypatch.setattr(app_module, "SITE_CONSTRAINT_DB_PATH", constraints_path)
+    monkeypatch.setattr(config, "SITE_CONSTRAINT_DB_PATH", constraints_path)
     assert building_at(*point) is not None
 
     response = client.post("/api/site-screening", json={"coordinates": list(point)})
@@ -636,7 +628,7 @@ def test_site_screening_blocks_candidate_inside_detected_building(client, tmp_pa
 def test_site_screening_reports_unavailable_buildings_instead_of_clear_site(
     client, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(app_module, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite")
+    monkeypatch.setattr(config, "SITE_CONSTRAINT_DB_PATH", tmp_path / "not-imported.sqlite")
 
     response = client.post(
         "/api/site-screening",
@@ -664,7 +656,7 @@ def test_buildings_endpoint_returns_features_in_view(client, tmp_path, monkeypat
     point = _unserved_cell_point()
     constraints_path = tmp_path / "site_constraints.sqlite"
     _write_site_constraints(constraints_path, point)
-    monkeypatch.setattr(app_module, "SITE_CONSTRAINT_DB_PATH", constraints_path)
+    monkeypatch.setattr(config, "SITE_CONSTRAINT_DB_PATH", constraints_path)
     lon, lat = point
 
     response = client.get(
@@ -746,7 +738,7 @@ def test_recommendation_actions_come_from_cell_indicators():
 def _flooded_point():
     import rasterio as rio
 
-    with rio.open(app_module.FLOOD_DEPTH_PATH) as source:
+    with rio.open(config.FLOOD_DEPTH_PATH) as source:
         depth = source.read(1)
         rows, cols = np.nonzero((depth > 1) & (depth != source.nodata))
         boundary = load_payloads()["boundary"]["features"][0]["geometry"]
@@ -916,10 +908,8 @@ def test_walking_route_uses_paths_at_walking_speed(client):
 
 
 def test_settlement_walking_distance_to_nearest_service(client):
-    import app as application
-
     features = client.get("/api/settlements").get_json()["features"]
-    health_sites = application.service_sites("health")
+    health_sites = walking.service_sites("health")
     schools = load_payloads()["schools"]
     checked = 0
     for feature in features[:200]:
