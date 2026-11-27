@@ -120,9 +120,12 @@ function updateSelectedRouteStatus(index, settlement, facility) {
   routeTotalDistance.textContent = `${choice.total_distance_km.toFixed(1)} km`;
   routeTravelTime.textContent = `~${estimatedTime}`;
   routeConnectors.textContent = `${connectorKm.toFixed(2)} km`;
-  routeStatus.textContent = routeModeSelect.value === "walking"
-    ? `${choice.label}: ${settlement.properties.name} to ${facility.name}, on foot at 5 km/h along roads and paths. Excludes rests, terrain and river crossings.`
-    : `${choice.label}: ${settlement.properties.name} to ${facility.name}, by motorcycle or ambulance on mapped roads. Approximate time; excludes traffic, road conditions, and access time.`;
+  const how = {
+    walking: "on foot at 5 km/h along roads and paths. Excludes rests, terrain and river crossings.",
+    bicycle: "by bicycle at 12 km/h along roads, tracks and paths. Excludes rests, hills and river crossings.",
+    vehicle: "by motorcycle or ambulance on mapped roads. Approximate time; excludes traffic, road conditions, and access time.",
+  }[routeModeSelect.value];
+  routeStatus.textContent = `${choice.label}: ${settlement.properties.name} to ${facility.name}, ${how}`;
 }
 
 function clearRoute() {
@@ -195,9 +198,11 @@ export async function findRoute() {
   routeResultsPanel.hidden = true;
   routeOptionsContainer.replaceChildren();
   clearRouteMetrics();
-  routeControlStatus.textContent = routeModeSelect.value === "walking"
-    ? "Calculating the shortest walking route along roads and paths…"
-    : "Calculating motorcycle / ambulance routes on mapped roads. The first request may take several seconds to prepare the road network.";
+  routeControlStatus.textContent = {
+    walking: "Calculating the shortest walking route along roads and paths…",
+    bicycle: "Calculating the shortest cycling route along roads, tracks and paths. The first request may take several seconds to prepare the network.",
+    vehicle: "Calculating motorcycle / ambulance routes on mapped roads. The first request may take several seconds to prepare the road network.",
+  }[routeModeSelect.value];
   findRouteButton.textContent = "Finding route...";
   findRouteButton.classList.add("is-loading");
   findRouteButton.setAttribute("aria-busy", "true");

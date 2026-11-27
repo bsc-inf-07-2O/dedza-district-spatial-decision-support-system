@@ -11,6 +11,13 @@ const scenarioCandidateList = document.getElementById("scenario-candidate-list")
 const scenarioResultsSummary = document.getElementById("scenario-results-summary");
 const scenarioResultsToggle = document.getElementById("toggle-scenario-results");
 
+// "motorcycle", "bicycle" or "walking": the mode of the candidate's time bands.
+export function travelModeLabel(candidate) {
+  return candidate.populationEstimate?.road_time_access?.mode_label
+    || { walking: "walking", bicycle: "bicycle" }[candidate.travelMode]
+    || "motorcycle";
+}
+
 // Settlements within the candidate's radius before and after adding it.
 export function getScenarioMetrics(active, candidate = state.scenarios[0]) {
   if (!candidate) return null;
@@ -49,13 +56,13 @@ function nearestOf(features, coordinates) {
   return best;
 }
 
-// Settlements newly within the 30- and 60-minute road-time bands.
-function getScenarioRoadMetrics(active, candidate) {
+// Settlements newly within the 30- and 60-minute travel-time bands (by the candidate's travel mode).
+export function getScenarioRoadMetrics(active, candidate) {
   const roadAccess = candidate.populationEstimate?.road_time_access;
   if (!roadAccess?.available) {
     return {
       available: false,
-      reason: roadAccess?.reason || "Road-time data is unavailable for this candidate.",
+      reason: roadAccess?.reason || "Travel-time data is unavailable for this candidate.",
     };
   }
 
@@ -252,7 +259,7 @@ export function renderScenario(active) {
 
     if (candidate.loading) {
       const loading = document.createElement("p");
-      loading.textContent = "Estimating population and road-time access…";
+      loading.textContent = "Estimating population and travel-time access…";
       card.appendChild(loading);
     } else if (candidate.populationError) {
       const error = document.createElement("p");
@@ -313,13 +320,14 @@ function appendEstimate(card, active, candidate, metrics) {
   capacityNote.className = "scenario-capacity-note";
   capacityNote.textContent = "Capacity: unknown. Staffing, beds, and service-volume data are unavailable, so this comparison does not estimate facility capacity.";
   let roadDetails = null;
+  const modeLabel = travelModeLabel(candidate);
   if (!roadMetrics.available) {
-    roadSummary.textContent = `Road-time access unavailable: ${roadMetrics.reason}`;
+    roadSummary.textContent = `Travel-time access (${modeLabel}) unavailable: ${roadMetrics.reason}`;
   } else {
     const bandSummaries = roadMetrics.bands.map(
       (band) => `≤${band.minutes} min +${band.newlyReachable.length}`
     );
-    roadSummary.textContent = `New mapped settlements within road-time bands vs existing ${existingServiceLabel}: ${bandSummaries.join("; ")}.`;
+    roadSummary.textContent = `New mapped settlements within ${modeLabel} time bands vs existing ${existingServiceLabel}: ${bandSummaries.join("; ")}.`;
     const details = document.createElement("details");
     details.className = "scenario-road-details";
     roadDetails = details;
@@ -327,7 +335,7 @@ function appendEstimate(card, active, candidate, metrics) {
     detailsSummary.textContent = "Settlement access details and assumptions";
     details.appendChild(detailsSummary);
     const explanation = document.createElement("p");
-    explanation.textContent = `Times compare travel from mapped settlements to this candidate and the nearest existing ${existingServiceLabel} along the mapped road network.`;
+    explanation.textContent = `Times compare travel by ${modeLabel} from mapped settlements to this candidate and the nearest existing ${existingServiceLabel} along the mapped ${candidate.travelMode === "vehicle" ? "road network" : "roads, tracks and paths"}.`;
     details.appendChild(explanation);
     roadMetrics.bands.forEach((band) => {
       const bandLabel = document.createElement("strong");
@@ -350,14 +358,16 @@ function appendEstimate(card, active, candidate, metrics) {
     });
     if (roadMetrics.excludedCount) {
       const excluded = document.createElement("p");
-      excluded.textContent = `${roadMetrics.excludedCount} of ${roadMetrics.settlements.length} mapped settlements are more than 1 km from a mapped road and are excluded from road-time counts.`;
+      excluded.textContent = `${roadMetrics.excludedCount} of ${roadMetrics.settlements.length} mapped settlements are more than 1 km from the mapped network and are excluded from travel-time counts.`;
       details.appendChild(excluded);
     }
     const speeds = Object.entries(roadMetrics.roadAccess.speed_assumptions_kmh)
       .map(([roadClass, speed]) => `${roadClass}: ${speed} km/h`)
       .join("; ");
     const assumptions = document.createElement("p");
-    assumptions.textContent = `Indicative motorcycle speeds (${speeds}). Straight-line connector time is excluded; traffic, road condition, stops, and season are not modeled.`;
+    assumptions.textContent = candidate.travelMode === "vehicle"
+      ? `Indicative motorcycle speeds (${speeds}). Straight-line connector time is excluded; traffic, road condition, stops, and season are not modeled.`
+      : `Assumed ${modeLabel} speed (${speeds}). Straight-line connector time is excluded; rests, hills, river crossings and season are not modeled.`;
     details.appendChild(assumptions);
   }
   card.append(roadSummary, capacityNote);
@@ -416,10 +426,10 @@ function renderScenarioSummary(active) {
       : `Highest pop #${highestPopulation.id}: +${populationGain} people`;
     const roadSummary = highestThirtyMinuteGain
       ? siteCount === 1
-        ? `New settlements ≤30 min: ${highestThirtyMinuteGain.gain}`
-        : `Most new settlements ≤30 min #${highestThirtyMinuteGain.candidate.id}: +${highestThirtyMinuteGain.gain}`
+        ? `New settlements ≤30 min by ${travelModeLabel(highestThirtyMinuteGain.candidate)}: ${highestThirtyMinuteGain.gain}`
+        : `Most new settlements ≤30 min by ${travelModeLabel(highestThirtyMinuteGain.candidate)} #${highestThirtyMinuteGain.candidate.id}: +${highestThirtyMinuteGain.gain}`
       : "";
     scenarioResultsSummary.textContent = `${siteCount} site${siteCount === 1 ? "" : "s"} · ${populationSummary}${roadSummary ? ` · ${roadSummary}` : ""} · Capacity unknown`;
-    scenarioStatus.textContent = `Compared ${state.scenarios.length} candidate site${state.scenarios.length === 1 ? "" : "s"}. Population gain and road-time settlement reach are separate signals; facility capacity is not assessed.`;
+    scenarioStatus.textContent = `Compared ${state.scenarios.length} candidate site${state.scenarios.length === 1 ? "" : "s"}. Population gain and travel-time settlement reach are separate signals; facility capacity is not assessed.`;
   }
 }

@@ -108,7 +108,13 @@
           </select>
           <label for="scenario-radius">Walking distance (km)</label>
           <input id="scenario-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="scenario-help" />
-          <p class="control-hint" id="scenario-help">Choose a facility type and radius, then let the system suggest the best sites or add your own candidates; sites are ranked by people newly brought within walking reach. Compare separate signals: WorldPop population within the radius as walking distance along roads and footpaths, settlements newly within 30- and 60-minute motorcycle road-time bands versus existing same-type services, and the affected TAs. Road times use indicative motorcycle speeds and exclude connector time, traffic and road conditions. Facility capacity data is unavailable and is not scored. Each candidate is assessed independently; field verification is needed.</p>
+          <label for="scenario-travel-mode">Travel time by</label>
+          <select id="scenario-travel-mode" aria-describedby="scenario-help">
+            <option value="vehicle" data-meta="Roads only, indicative motorcycle speeds" selected>Motorcycle / ambulance</option>
+            <option value="bicycle" data-meta="Roads, tracks and paths at 12 km/h">Bicycle</option>
+            <option value="walking" data-meta="Roads, tracks and footpaths at 5 km/h">Walking</option>
+          </select>
+          <p class="control-hint" id="scenario-help">Choose a facility type and radius, then let the system suggest the best sites or add your own candidates; sites are ranked by people newly brought within walking reach. Compare separate signals: WorldPop population within the radius as walking distance along roads and footpaths, settlements newly within 30- and 60-minute travel-time bands (by the travel mode you choose) versus existing same-type services, and the affected TAs. Travel times exclude connector time, traffic and road conditions. Facility capacity data is unavailable and is not scored. Each candidate is assessed independently; field verification is needed.</p>
           <div class="scenario-actions">
             <button type="button" id="suggest-sites" class="primary-action" data-icon="spark" title="Find the 3 locations that would bring the most currently unserved people within the access radius">Suggest best sites</button>
             <button type="button" id="place-scenario" data-icon="pin" title="Then click the map, or use Add candidate site here in any cell popup">Add site on map</button>
@@ -120,10 +126,11 @@
       <div class="tool-view" data-tool-view="routes" data-title="Routes" hidden>
         <section class="route-control">
           <h2>Road route estimate</h2>
-          <p class="control-hint">Walking follows roads, tracks and footpaths at 5 km/h; motorcycle / ambulance uses roads only at indicative speeds and compares the shortest and quickest routes. Tip: click a settlement or facility on the map and use <strong>Route from here</strong> / <strong>Route to here</strong>.</p>
+          <p class="control-hint">Walking follows roads, tracks and footpaths at 5 km/h and cycling at 12 km/h; motorcycle / ambulance uses roads only at indicative speeds and compares the shortest and quickest routes. Tip: click a settlement or facility on the map and use <strong>Route from here</strong> / <strong>Route to here</strong>.</p>
           <label for="route-mode">Travel mode</label>
       <select id="route-mode">
         <option value="walking" data-meta="Roads, tracks and footpaths at 5 km/h" selected>Walking</option>
+        <option value="bicycle" data-meta="Roads, tracks and paths at 12 km/h">Bicycle</option>
         <option value="vehicle" data-meta="Roads only, indicative motorcycle speeds">Motorcycle / ambulance</option>
       </select>
       <label for="route-settlement">From settlement</label>

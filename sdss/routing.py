@@ -12,7 +12,14 @@ from functools import lru_cache
 
 import numpy as np
 
-from scripts.road_network import build_graph, fetch_road_rows, haversine_km, motorcycle_speed_kmh
+from scripts.road_network import (
+    BICYCLE_SPEED_KMH,
+    WALKING_SPEED_KMH,
+    build_graph,
+    fetch_road_rows,
+    haversine_km,
+    motorcycle_speed_kmh,
+)
 
 from . import config
 
@@ -21,7 +28,8 @@ Graph = dict[Node, list[tuple[Node, float, float]]]
 
 # Nearest-node lookup arrays, one per network (keyed by the projected-node dict).
 _ROAD_NODE_INDEX: dict[int, tuple[tuple[Node, ...], np.ndarray]] = {}
-_REVERSED_GRAPH: tuple[int, Graph] | None = None
+# Reversed graphs, one per network (keyed by the graph object's id).
+_REVERSED_GRAPHS: dict[int, Graph] = {}
 
 
 class RouteNetworkUnavailable(Exception):
@@ -44,6 +52,15 @@ def motorcycle_speed_assumptions_kmh() -> dict[str, float]:
     }
 
 
+def speed_assumptions_kmh(mode: str) -> dict[str, float]:
+    """Assumed speed per way class for a travel mode, as shown to the user."""
+    if mode == "walking":
+        return {"all roads, tracks and paths": WALKING_SPEED_KMH}
+    if mode == "bicycle":
+        return {"all roads, tracks and paths (no steps)": BICYCLE_SPEED_KMH}
+    return motorcycle_speed_assumptions_kmh()
+
+
 # ---------------------------------------------------------------------------
 # Loading the network
 # ---------------------------------------------------------------------------
@@ -62,10 +79,11 @@ def road_rows() -> list[tuple[str, str, str]]:
     return fetch_road_rows(config.ROUTE_DB_PATH)
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=3)
 def load_road_network(mode: str = "vehicle") -> tuple[Graph, dict[Node, Node], dict[Node, tuple[float, float]]]:
-    """Road graph for `mode`: "vehicle" (roads and tracks, motorcycle speeds,
-    one-way respected) or "walking" (all ways including paths, 5 km/h)."""
+    """Road graph for `mode`, built once and reused: "vehicle" (roads and tracks,
+    motorcycle speeds, one-way respected), "walking" (all ways including paths,
+    5 km/h) or "bicycle" (all ways except steps, 12 km/h)."""
     graph = build_graph(road_rows(), mode)
     if not graph:
         raise RouteNetworkUnavailable("No mapped road segments are available in Dedza.")
@@ -167,15 +185,17 @@ def shortest_road_time_to_target(graph: Graph, start: Node, target: Node, max_ti
 
 
 def reverse_road_graph(graph: Graph) -> Graph:
-    """Edges flipped (v -> u for every u -> v), cached for the current graph object."""
-    global _REVERSED_GRAPH
-    if _REVERSED_GRAPH is not None and _REVERSED_GRAPH[0] == id(graph):
-        return _REVERSED_GRAPH[1]
+    """Edges flipped (v -> u for every u -> v), cached per graph object."""
+    key = id(graph)
+    if key in _REVERSED_GRAPHS:
+        return _REVERSED_GRAPHS[key]
     reversed_graph: Graph = {node: [] for node in graph}
     for node, edges in graph.items():
         for neighbor, distance_km, time_min in edges:
             reversed_graph.setdefault(neighbor, []).append((node, distance_km, time_min))
-    _REVERSED_GRAPH = (id(graph), reversed_graph)
+    if len(_REVERSED_GRAPHS) >= len(config.ROUTE_MODES):
+        _REVERSED_GRAPHS.clear()  # stale graphs (tests swap them in and out)
+    _REVERSED_GRAPHS[key] = reversed_graph
     return reversed_graph
 
 
@@ -314,18 +334,17 @@ def calculate_road_route(origin: Node, destination: Node, mode: str = "vehicle")
     origin_snap_km = haversine_km(origin, coordinates[start])
     destination_snap_km = haversine_km(destination, coordinates[target])
     if max(origin_snap_km, destination_snap_km) > 1:
-        network = "path or road" if mode == "walking" else "road"
+        network = "road" if mode == "vehicle" else "path or road"
         raise RouteEndpointTooFar(f"An endpoint is more than 1 km from the mapped {network} network.")
 
     shortest_path = shortest_road_path(graph, start, target)
     if shortest_path is None:
         return None
     distance_paths = [shortest_path, *alternative_road_paths(graph, shortest_path, 1, probe_count=1)]
-    # On foot every way has the same speed, so the shortest route is also the quickest.
-    fastest_path = None if mode == "walking" else shortest_road_path(graph, start, target, optimize_time=True)
-    path_labels: dict[tuple[Node, ...], str] = {
-        tuple(distance_paths[0]): "Shortest walking route" if mode == "walking" else "Shortest distance",
-    }
+    # On foot or by bicycle every way has the same speed, so the shortest route is also the quickest.
+    fastest_path = shortest_road_path(graph, start, target, optimize_time=True) if mode == "vehicle" else None
+    shortest_label = {"walking": "Shortest walking route", "bicycle": "Shortest cycling route"}.get(mode, "Shortest distance")
+    path_labels: dict[tuple[Node, ...], str] = {tuple(distance_paths[0]): shortest_label}
     if fastest_path is not None:
         fastest_key = tuple(fastest_path)
         if fastest_key in path_labels:

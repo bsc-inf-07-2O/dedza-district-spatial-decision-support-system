@@ -42,7 +42,7 @@ def route():
         return _error("Origin and destination must be [longitude, latitude] coordinates.")
     mode = payload.get("mode", "vehicle")
     if mode not in config.ROUTE_MODES:
-        return _error('mode must be "walking" or "vehicle".')
+        return _error('mode must be "walking", "bicycle" or "vehicle".')
     try:
         result = calculate_road_route(origin, destination, mode)
     except (FileNotFoundError, RouteNetworkUnavailable) as error:
@@ -107,6 +107,10 @@ def scenario_population():
     radius = data.get("radius_km")
     if not _valid_radius(radius):
         return _error("radius_km must be a number between 1 and 50.")
+    # Travel mode for the time bands; the population reach is always on foot.
+    travel_mode = data.get("travel_mode", "vehicle")
+    if travel_mode not in config.ROUTE_MODES:
+        return _error('travel_mode must be "walking", "bicycle" or "vehicle".')
     try:
         estimate = estimate_scenario_population(*coordinates, float(radius), facility_type)
     except ValueError as error:
@@ -115,7 +119,7 @@ def scenario_population():
         return _error(str(error), 503)
     estimate["site_suitability"] = site_checker().check(*coordinates)
     try:
-        estimate["road_time_access"] = estimate_scenario_road_access(*coordinates, facility_type)
+        estimate["road_time_access"] = estimate_scenario_road_access(*coordinates, facility_type, travel_mode)
     except (FileNotFoundError, RouteNetworkUnavailable) as error:
         estimate["road_time_access"] = {
             "available": False,
