@@ -109,8 +109,11 @@ mapLegend.onAdd = () => {
   const div = L.DomUtil.create("div", "map-legend");
   // Each entry carries data-layer; updateMapLegend() shows only entries whose
   // layer is on the map, and hides a section when none of its entries are.
+  // The title is a button that collapses the legend; on phones it starts
+  // collapsed so the legend does not cover most of the small map.
   div.innerHTML = `
-    <strong class="map-legend-title">Map legend</strong>
+    <button type="button" class="map-legend-title" aria-expanded="true" aria-controls="map-legend-body">Map legend</button>
+    <div id="map-legend-body" class="map-legend-body">
     <div class="map-legend-section" data-section="health">
       <span class="map-legend-heading">Health access</span>
       <ul class="legend">
@@ -137,7 +140,15 @@ mapLegend.onAdd = () => {
         <li data-layer="landCover"><span class="swatch environmental-landcover"></span> WorldCover land cover</li>
         <li data-layer="flood"><span class="swatch flood-zone"></span> 1-in-100-year flood zone (deeper = darker)</li>
       </ul>
+    </div>
     </div>`;
+  const toggle = div.querySelector(".map-legend-title");
+  const setExpanded = (expanded) => {
+    toggle.setAttribute("aria-expanded", String(expanded));
+    div.classList.toggle("collapsed", !expanded);
+  };
+  toggle.addEventListener("click", () => setExpanded(toggle.getAttribute("aria-expanded") !== "true"));
+  setExpanded(!window.matchMedia("(max-width: 600px)").matches);
   L.DomEvent.disableClickPropagation(div);
   // Let the mouse wheel scroll the legend rather than zoom the map.
   L.DomEvent.disableScrollPropagation(div);

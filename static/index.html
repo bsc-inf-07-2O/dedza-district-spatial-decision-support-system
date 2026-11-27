@@ -54,7 +54,7 @@
         <h2 id="tool-panel-title">Tool</h2>
         <button type="button" id="close-tool-panel" class="icon-button" aria-label="Close panel" title="Close (Esc)">×</button>
       </header>
-      <div class="tool-panel-body">
+      <div class="tool-panel-body" tabindex="0" role="region" aria-label="Tool settings, scrollable">
       <div class="tool-view" data-tool-view="overview" data-title="Overview" hidden>
         <p class="lede">
           Find where health and school access falls short in Dedza, and decide
@@ -245,13 +245,15 @@
       <div class="deck-resizer" id="deck-resizer" role="separator" aria-orientation="horizontal" aria-controls="insights-deck" aria-label="Resize the insights drawer" title="Drag to resize · double-click to collapse" tabindex="0"></div>
       <nav class="analysis-tabs" aria-label="Analysis views">
         <button type="button" id="toggle-deck" class="deck-toggle" aria-expanded="true" aria-controls="insights-deck" title="Show or hide the insights drawer"><span class="deck-chevron" aria-hidden="true"></span><span class="deck-toggle-label">Insights</span></button>
-        <button type="button" class="analysis-tab active" data-panel="briefing-panel" aria-selected="true">Briefing</button>
-        <button type="button" class="analysis-tab" data-panel="priority-panel" aria-selected="false">Priority cells</button>
-        <button type="button" class="analysis-tab" data-panel="ta-panel" aria-selected="false">TA priorities</button>
-        <button type="button" class="analysis-tab" data-panel="settlement-panel" aria-selected="false">Settlement access</button>
+        <div class="analysis-tablist" role="tablist" aria-label="Analysis views">
+          <button type="button" class="analysis-tab active" role="tab" id="tab-briefing" data-panel="briefing-panel" aria-controls="briefing-panel" aria-selected="true">Briefing</button>
+          <button type="button" class="analysis-tab" role="tab" id="tab-priority" data-panel="priority-panel" aria-controls="priority-panel" aria-selected="false" tabindex="-1">Priority cells</button>
+          <button type="button" class="analysis-tab" role="tab" id="tab-ta" data-panel="ta-panel" aria-controls="ta-panel" aria-selected="false" tabindex="-1">TA priorities</button>
+          <button type="button" class="analysis-tab" role="tab" id="tab-settlement" data-panel="settlement-panel" aria-controls="settlement-panel" aria-selected="false" tabindex="-1">Settlement access</button>
+        </div>
         <button type="button" id="export-brief" class="export-button" data-icon="download" title="Download the selected area's planning brief as CSV">Export planning CSV</button>
       </nav>
-      <section class="table-wrap analysis-panel briefing-panel active" id="briefing-panel">
+      <section class="table-wrap analysis-panel briefing-panel active" id="briefing-panel" role="tabpanel" aria-labelledby="tab-briefing">
         <header class="briefing-header">
           <div>
             <p class="eyebrow">DD-SDSS · decision brief</p>
@@ -272,7 +274,7 @@
           </section>
           <section class="briefing-section">
             <h3>Highest-priority health-gap cells</h3>
-            <div class="table-scroll">
+            <div class="table-scroll" tabindex="0" role="region" aria-label="Highest-priority health-gap cells table">
               <table>
                 <thead><tr><th>Cell</th><th>Residents 2030 (growth)</th><th>Health distance</th><th>Road travel time</th></tr></thead>
                 <tbody id="briefing-priorities"></tbody>
@@ -294,10 +296,10 @@
           <p>Sources: MOH Malawi baseline facilities; Malawi schools dataset (Ministry of Education EMIS-matched; coordinates corrected); WorldPop 2025 R2025A v1 (CC BY 4.0); Malawi Health Facility Registry (MHFR, zipatala.health.gov.mw, Ministry of Health); GRID3 Malawi Settlement Extents v3.0 (CIESIN, CC BY-SA); OSM place names, roads and waterways; WorldPop 2020 and 2030 projection R2025A (CC BY 4.0); JRC Copernicus EMS GloFAS global river flood hazard maps v2.1 (ODbL); geoBoundaries Malawi district boundaries; Traditional Authority boundaries from geoBoundaries gbHumanitarian (NSO Malawi via HDX, CC BY 3.0 IGO).</p>
         </details>
       </section>
-      <section class="table-wrap analysis-panel" id="priority-panel" hidden>
+      <section class="table-wrap analysis-panel" id="priority-panel" role="tabpanel" aria-labelledby="tab-priority" hidden>
         <h2>Priority screening cells</h2>
         <p>Highest-scoring 3 km cells, combining projected 2030 residents, growth, walking distance to the nearest facility, road access and flood safety. Scores follow the Priority weights settings; "new" marks cells that are not in the baseline top 12. Select a row to zoom to it.</p>
-        <div class="table-scroll">
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Priority screening cells table">
           <table>
             <thead>
               <tr>
@@ -316,10 +318,10 @@
           </table>
         </div>
       </section>
-      <section class="table-wrap analysis-panel" id="ta-panel" hidden>
+      <section class="table-wrap analysis-panel" id="ta-panel" role="tabpanel" aria-labelledby="tab-ta" hidden>
         <h2>Traditional Authority priorities</h2>
         <p>Ranked by estimated population in baseline health cells more than 8 km from a facility (WorldPop 2025). The share shows the proportion of each TA's estimated population affected. Settlement columns use fixed baseline walking distances (1 km to a school, 5 km to a health facility) and do not follow the sliders. This is a screening priority, not a measure of facility capacity. Select a row to filter the map.</p>
-        <div class="table-scroll">
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Traditional Authority priorities table">
           <table>
             <thead>
               <tr>
@@ -340,10 +342,10 @@
           </table>
         </div>
       </section>
-      <section class="table-wrap analysis-panel" id="settlement-panel" hidden>
+      <section class="table-wrap analysis-panel" id="settlement-panel" role="tabpanel" aria-labelledby="tab-settlement" hidden>
         <h2>Settlement-level access</h2>
         <p>GRID3 settlements, most remote from health care first. Nearest mapped school and health facility by walking distance along roads and footpaths; population is the WorldPop 2025 estimate inside each settlement extent. Select a row to zoom to it.</p>
-        <div class="table-scroll">
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Settlement-level access table">
           <table>
             <thead>
               <tr>

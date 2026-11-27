@@ -42,9 +42,10 @@ function drawReferenceLayers(active) {
   }).addTo(layers.roads);
 
   L.geoJSON(active.registry, {
-    pointToLayer: (_, latlng) => L.marker(
+    // `title` gives each marker an accessible name (and a hover tooltip).
+    pointToLayer: (feature, latlng) => L.marker(
       latlng,
-      { icon: mapSymbol("diamond", "#8bd4c4", "#176a7b", 11) }
+      { icon: mapSymbol("diamond", "#8bd4c4", "#176a7b", 11), title: `${feature.properties.name} (MHFR registry)` }
     ),
     onEachFeature: (feature, layer) => {
       const p = feature.properties;
@@ -68,6 +69,7 @@ function drawReferenceLayers(active) {
   active.facilities.forEach((facility) => {
     L.marker([facility.lat, facility.lon], {
       icon: mapSymbol("circle", "#fff", "#cf5c36", facility.facility_type === "Hospital" ? 14 : 10),
+      title: `${facility.name} (${facility.facility_type || "health facility"})`,
     })
       .bindPopup(popupCard({
         kicker: "MOH baseline health facility",
@@ -87,6 +89,7 @@ function drawReferenceLayers(active) {
     const [lon, lat] = school.geometry.coordinates;
     L.marker([lat, lon], {
       icon: mapSymbol("square", "#f4a261", "#873e2e", 8),
+      title: `${school.properties.name} (school)`,
     })
       .bindPopup(popupCard({
         kicker: "School",

@@ -42,18 +42,35 @@ export function setupBriefingActions() {
   });
 }
 
+// Insights tabs follow the ARIA tabs pattern: only the selected tab is in the
+// Tab order, and Left/Right/Home/End move between tabs.
 export function setupInsightTabs() {
-  document.querySelectorAll(".analysis-tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".analysis-tab").forEach((item) => {
-        const selected = item === tab;
-        item.classList.toggle("active", selected);
-        item.setAttribute("aria-selected", String(selected));
-      });
-      document.querySelectorAll(".analysis-panel").forEach((panel) => {
-        panel.hidden = panel.id !== tab.dataset.panel;
-        panel.classList.toggle("active", !panel.hidden);
-      });
+  const tabs = [...document.querySelectorAll(".analysis-tab")];
+  const select = (tab) => {
+    tabs.forEach((item) => {
+      const selected = item === tab;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-selected", String(selected));
+      item.tabIndex = selected ? 0 : -1;
+    });
+    document.querySelectorAll(".analysis-panel").forEach((panel) => {
+      panel.hidden = panel.id !== tab.dataset.panel;
+      panel.classList.toggle("active", !panel.hidden);
+    });
+  };
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => select(tab));
+    tab.addEventListener("keydown", (event) => {
+      const next = {
+        ArrowRight: tabs[(index + 1) % tabs.length],
+        ArrowLeft: tabs[(index - 1 + tabs.length) % tabs.length],
+        Home: tabs[0],
+        End: tabs[tabs.length - 1],
+      }[event.key];
+      if (!next) return;
+      event.preventDefault();
+      next.focus();
+      next.click();
     });
   });
 }
