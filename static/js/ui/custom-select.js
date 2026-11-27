@@ -260,8 +260,11 @@ export function enhanceSelect(select) {
       close();
     }
   });
+  // Opening re-renders the trigger label, which can detach the clicked <span>
+  // mid-click; the event path is fixed when the click starts, so it still
+  // shows whether the click began inside this dropdown.
   document.addEventListener("click", (event) => {
-    if (!wrapper.contains(event.target)) close();
+    if (!event.composedPath().includes(wrapper)) close();
   });
   select.addEventListener("change", sync);
   new MutationObserver(() => {

@@ -1,5 +1,5 @@
 // Traditional Authority ranking: the "TA priorities" table and the TA dropdown.
-import { data } from "../data.js";
+import { data, nearestSchool } from "../data.js";
 import { state } from "../state.js";
 import { escapeHtml } from "../ui/format.js";
 import { selectTA } from "./area.js";
@@ -24,7 +24,8 @@ export function buildTAComparison() {
     const includes = (point) => areas.some((area) => turf.booleanPointInPolygon(point, area));
     const taSettlements = settlements.features.filter((feature) => includes(feature));
     const schoolReach = taSettlements.filter(
-      (feature) => data.nearestSchoolBySettlement.get(feature)?.distance <= 1
+      // The TA table is built once, so it uses schools of every level.
+      (feature) => nearestSchool(feature, "all")?.distance <= 1
     ).length;
     const healthGaps = taSettlements.filter(
       (feature) => (data.nearestFacilityBySettlement.get(feature)?.distance ?? Infinity) > 5

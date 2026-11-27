@@ -26,8 +26,10 @@ export const state = {
   baselineTopCells: new Set(),
   priorityRequestId: 0,
 
-  // Schools tool
+  // Schools tool: walking radius and which schools count ("all", "primary" or
+  // "secondary"). The level also applies to school candidates in New sites.
   schoolRadiusKm: 5,
+  schoolLevel: "all",
 };
 
 // Fill in the starting values from the first API responses (see static/js/data.js).

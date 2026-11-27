@@ -3,6 +3,7 @@
 import { postJson } from "../api.js";
 import { map } from "../map/map.js";
 import { state } from "../state.js";
+import { schoolNoun } from "../ui/format.js";
 import { showNotice } from "../ui/notice.js";
 import { activeData, pointInScope } from "./area.js";
 import { render } from "./render.js";
@@ -14,14 +15,21 @@ const scenarioStatus = document.getElementById("scenario-status");
 const placeScenarioButton = document.getElementById("place-scenario");
 const suggestSitesButton = document.getElementById("suggest-sites");
 
-// Results are cached per area, facility type and radius.
+// Results are cached per area, facility type, radius and school level.
 const suggestionCache = new Map();
 const suggestionPending = new Set();
 
-async function fetchSuggestedSites(type, radiusKm, count = 3, exclude = []) {
+async function fetchSuggestedSites(type, radiusKm, count = 3, exclude = [], schoolLevel = "all") {
   const result = await postJson(
     "/api/suggest-sites",
-    { type, radius_km: radiusKm, area: state.name || null, exclude, count },
+    {
+      type,
+      radius_km: radiusKm,
+      area: state.name || null,
+      exclude,
+      count,
+      school_level: type === "school" ? schoolLevel : "all",
+    },
     "Site suggestion",
   );
   return result.picks;
@@ -29,12 +37,12 @@ async function fetchSuggestedSites(type, radiusKm, count = 3, exclude = []) {
 
 // Best single site for the briefing: undefined while calculating, null if none.
 // The briefing re-renders when the answer arrives.
-export function cachedSuggestion(type, radiusKm) {
-  const key = `${state.name || ""}|${type}|${radiusKm}`;
+export function cachedSuggestion(type, radiusKm, schoolLevel = "all") {
+  const key = `${state.name || ""}|${type}|${radiusKm}|${type === "school" ? schoolLevel : "all"}`;
   if (suggestionCache.has(key)) return suggestionCache.get(key);
   if (!suggestionPending.has(key)) {
     suggestionPending.add(key);
-    fetchSuggestedSites(type, radiusKm, 1)
+    fetchSuggestedSites(type, radiusKm, 1, [], schoolLevel)
       .then((picks) => suggestionCache.set(key, picks[0] || null))
       .catch(() => suggestionCache.set(key, null))
       .finally(() => {
@@ -74,15 +82,17 @@ export async function addSuggestedSites({ type, radius } = {}) {
     showNotice("Invalid radius", "Enter a scenario radius between 1 and 50 km.", "error", true);
     return;
   }
-  const label = siteType === "school" ? "school" : "health centre";
+  // School suggestions follow the Schools tool's level (all, primary or secondary).
+  const schoolLevel = siteType === "school" ? state.schoolLevel : "all";
+  const label = siteType === "school" ? schoolNoun(schoolLevel) : "health centre";
   suggestSitesButton.disabled = true;
   suggestSitesButton.classList.add("is-loading");
   showNotice("Finding best sites", `Calculating walking reach for ${label} locations…`, "warning", false);
   let picks;
   try {
     picks = await fetchSuggestedSites(siteType, radiusKm, 3, state.scenarios
-      .filter((candidate) => candidate.type === siteType)
-      .map((candidate) => candidate.point.geometry.coordinates));
+      .filter((candidate) => candidate.type === siteType && (candidate.schoolLevel || "all") === schoolLevel)
+      .map((candidate) => candidate.point.geometry.coordinates), schoolLevel);
   } catch (error) {
     suggestSitesButton.disabled = false;
     suggestSitesButton.classList.remove("is-loading");
@@ -92,7 +102,7 @@ export async function addSuggestedSites({ type, radius } = {}) {
   if (!picks.length) {
     suggestSitesButton.disabled = false;
     suggestSitesButton.classList.remove("is-loading");
-    const message = `Every populated settlement in ${state.name || "Dedza"} is already within ${radiusKm} km walking distance of a ${siteType === "school" ? "school" : "health facility"} or a candidate site.`;
+    const message = `Every populated settlement in ${state.name || "Dedza"} is already within ${radiusKm} km walking distance of a ${siteType === "school" ? label : "health facility"} or a candidate site.`;
     scenarioStatus.textContent = message;
     showNotice("No coverage gap at this radius", message, "success", true);
     return;
@@ -108,6 +118,7 @@ export async function addSuggestedSites({ type, radius } = {}) {
         id: state.nextScenarioId++,
         point: open.point,
         type: siteType,
+        schoolLevel,
         radius: radiusKm,
         siteScreening: open.siteScreening,
         loading: true,

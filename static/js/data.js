@@ -1,6 +1,7 @@
 // Everything the page loads from the API at start-up, plus lookups built from it.
 // `data` is filled once by loadData() and then only read.
 import { fetchJson } from "./api.js";
+import { state } from "./state.js";
 
 export const data = {};
 
@@ -85,19 +86,33 @@ export async function loadData() {
     data.routeIndexByFacility.set(feature, facilities.length + index));
   data.settlementIndex = new Map(settlements.features.map((feature, index) => [feature, index]));
 
-  // Walking distance (km) along roads, tracks and paths, calculated on the server.
-  data.nearestSchoolBySettlement = new WeakMap();
+  // Walking distance (km) along roads, tracks and paths, calculated on the server:
+  // to the nearest school of any level, and to the nearest primary / secondary school.
+  data.nearestSchoolByLevel = { all: new WeakMap(), primary: new WeakMap(), secondary: new WeakMap() };
   data.nearestFacilityBySettlement = new WeakMap();
   settlements.features.forEach((settlement) => {
     const p = settlement.properties;
-    const school = p.nearest_school_index == null ? null : schools.features[p.nearest_school_index];
-    data.nearestSchoolBySettlement.set(
-      settlement,
-      school && p.walk_km_school != null ? { school, distance: Number(p.walk_km_school) } : null
-    );
+    Object.entries(data.nearestSchoolByLevel).forEach(([level, lookup]) => {
+      const suffix = level === "all" ? "" : `_${level}`;
+      const index = p[`nearest_school${suffix}_index`];
+      const distance = p[`walk_km_school${suffix}`];
+      const school = index == null ? null : schools.features[index];
+      lookup.set(settlement, school && distance != null ? { school, distance: Number(distance) } : null);
+    });
     data.nearestFacilityBySettlement.set(
       settlement,
       p.nearest_health && p.walk_km_health != null ? { facility: p.nearest_health, distance: Number(p.walk_km_health) } : null
     );
   });
+}
+
+// Nearest school of the chosen level ({ school, distance } or null).
+export function nearestSchool(settlement, level = state.schoolLevel) {
+  return data.nearestSchoolByLevel[level]?.get(settlement) ?? null;
+}
+
+// School features of the chosen level. Schools whose names give no level
+// (level_group null) only count under "all".
+export function schoolsAtLevel(features, level = state.schoolLevel) {
+  return level === "all" ? features : features.filter((school) => school.properties.level_group === level);
 }

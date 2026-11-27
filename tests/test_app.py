@@ -13,6 +13,7 @@ from sdss import config, routing, walking
 from sdss.data import building_at, db, load_payloads
 from sdss.routing import calculate_road_route, project_road_node, shortest_road_time_to_target
 from sdss.scenario import estimate_scenario_road_access, scenario_baseline_road_times
+from sdss.schools import level_group, school_level
 
 
 @pytest.fixture
@@ -923,6 +924,58 @@ def test_settlement_walking_distance_to_nearest_service(client):
         assert p["walk_km_school"] >= haversine_km(point, (school["lon"], school["lat"])) - 0.05
         checked += 1
     assert checked > 150
+
+
+def test_school_level_from_name():
+    assert school_level("Bembeke CDSS") == "Secondary"
+    assert school_level("Chawa Open") == "Secondary"
+    assert school_level("St. Kizito Seminary") == "Secondary"
+    assert school_level("Kanyama J.P") == "Junior primary"
+    assert school_level("Kanyama F.P") == "Primary"
+    assert school_level("Bembeke RC") == "School"
+    assert level_group("Kanyama J.P") == "primary"
+    assert level_group("Bembeke RC") is None
+
+
+def test_settlement_walking_distance_by_school_level(client):
+    features = client.get("/api/settlements").get_json()["features"]
+    schools = client.get("/api/schools").get_json()["features"]
+    within = {level: 0 for level in ("", "_primary", "_secondary")}
+    for feature in features:
+        p = feature["properties"]
+        for level in ("_primary", "_secondary"):
+            index = p[f"nearest_school{level}_index"]
+            if index is None:
+                continue
+            assert schools[index]["properties"]["level_group"] == level[1:]
+            # The nearest school of any level is never further than one of a given level.
+            assert p["walk_km_school"] <= p[f"walk_km_school{level}"] + 1e-6
+        for level in within:
+            if p[f"walk_km_school{level}"] is not None and p[f"walk_km_school{level}"] <= 5:
+                within[level] += 1
+    # Secondary schools are far scarcer, so far fewer settlements are within a 5 km walk.
+    assert within[""] >= within["_primary"] > within["_secondary"]
+
+
+def test_suggest_secondary_school_sites(client):
+    body = {"type": "school", "radius_km": 5, "school_level": "secondary"}
+    picks = client.post("/api/suggest-sites", json=body).get_json()["picks"]
+    assert picks and picks[0]["people"] > 0
+    features = client.get("/api/settlements").get_json()["features"]
+    for pick in picks:
+        walk = features[pick["index"]]["properties"]["walk_km_school_secondary"]
+        assert walk is None or walk > 0
+    estimate = client.post(
+        "/api/scenario-population",
+        json={"coordinates": picks[0]["coordinates"], "type": "school", "radius_km": 5, "school_level": "secondary"},
+    ).get_json()
+    assert estimate["additional_population_estimate"] > 0
+    assert "secondary school" in estimate["method"]
+    assert client.post("/api/suggest-sites", json={**body, "school_level": "tertiary"}).status_code == 400
+    assert client.post(
+        "/api/scenario-population",
+        json={"coordinates": picks[0]["coordinates"], "type": "school", "radius_km": 5, "school_level": "x"},
+    ).status_code == 400
 
 
 def test_suggest_sites_maximises_walking_reach(client):

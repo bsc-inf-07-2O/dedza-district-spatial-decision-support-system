@@ -14,6 +14,7 @@ from scripts.site_constraints import point_in_geometry
 
 from . import config
 from .data import load_payloads, load_traditional_authorities, site_checker
+from .schools import SCHOOL_LEVELS, service_kind
 from .walking import service_walk_costs, settlement_nodes, walking_reach
 
 
@@ -32,18 +33,25 @@ def settlement_planning() -> list[dict]:
     points = [(float(s["lon"]), float(s["lat"])) for s in payloads["settlements"]]
     checks = site_checker().check_many(points)
     nodes = settlement_nodes()
-    health_sites, health_costs, health_origin = service_walk_costs("health")
-    school_sites, school_costs, school_origin = service_walk_costs("school")
+    health = service_walk_costs("health")
+    # Walking distance to the nearest school of any level, and of each level.
+    school_kinds = {level: service_walk_costs(service_kind("school", level)) for level in SCHOOL_LEVELS}
 
-    def nearest_service(node, snap, sites, costs, origin):
+    def nearest_service(node, snap, service):
+        sites, costs, origin = service
         if node not in costs:
             return None, None
         return round(costs[node] + snap, 2), sites[origin[node]]
 
     result = []
     for settlement, point, check, (node, snap) in zip(payloads["settlements"], points, checks, nodes):
-        walk_health, health = nearest_service(node, snap, health_sites, health_costs, health_origin)
-        walk_school, school = nearest_service(node, snap, school_sites, school_costs, school_origin)
+        walk_health, nearest_health = nearest_service(node, snap, health)
+        schools = {}
+        for level, service in school_kinds.items():
+            walk_school, school = nearest_service(node, snap, service)
+            suffix = "" if level == "all" else f"_{level}"
+            schools[f"walk_km_school{suffix}"] = walk_school
+            schools[f"nearest_school{suffix}_index"] = None if school is None else school["index"]
         ratio = district_ratio
         for index in tree.query(shapely_shape({"type": "Point", "coordinates": point}), predicate="within"):
             props = cells[int(index)]["properties"]
@@ -53,9 +61,8 @@ def settlement_planning() -> list[dict]:
         population = float(settlement["population"] or 0)
         result.append({
             "walk_km_health": walk_health,
-            "nearest_health": health,
-            "walk_km_school": walk_school,
-            "nearest_school_index": None if school is None else school_sites.index(school),
+            "nearest_health": nearest_health,
+            **schools,
             "population_2030": round(population * ratio, 1),
             "site_suitable": check["suitable"],
             "site_issues": [
@@ -79,11 +86,20 @@ def priority_baseline() -> tuple[dict[str, float], dict[str, float]]:
     return weights, scales
 
 
-def suggest_sites(facility_type: str, radius_km: float, area: str | None, exclude: list, count: int = 3) -> list[dict]:
+def suggest_sites(
+    facility_type: str,
+    radius_km: float,
+    area: str | None,
+    exclude: list,
+    count: int = 3,
+    school_level: str = "all",
+) -> list[dict]:
     """Greedy maximal coverage on walking distance.
 
     Demand: settlements in scope whose walk to the nearest existing service is
-    longer than the radius, weighted by projected 2030 residents. Candidate
+    longer than the radius, weighted by projected 2030 residents. For schools,
+    `school_level` ("all", "primary" or "secondary") picks which existing
+    schools count as the service. Candidate
     sites: settlements in scope that pass the site checks. Straight-line reach
     is an upper bound of walking reach, so candidates are evaluated lazily
     (exact walking reach only for the most promising ones).
@@ -91,7 +107,10 @@ def suggest_sites(facility_type: str, radius_km: float, area: str | None, exclud
     settlements = load_payloads()["settlements"]
     planning = settlement_planning()
     nodes = settlement_nodes()
-    key = "walk_km_school" if facility_type == "school" else "walk_km_health"
+    if facility_type != "school":
+        key = "walk_km_health"
+    else:
+        key = "walk_km_school" if school_level == "all" else f"walk_km_school_{school_level}"
     scope = None
     if area:
         scope = next(

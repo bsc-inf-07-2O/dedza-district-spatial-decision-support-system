@@ -65,12 +65,18 @@ export function growthText(properties) {
 
 // School level from Malawi naming conventions (F.P. full primary, J.P. junior
 // primary, CDSS community day secondary). The source has no level field.
+// sdss/schools.py applies the same rules on the server.
 export function schoolLevel(name) {
   const text = String(name || "").toLowerCase().replace(/\s+/g, " ");
-  if (/\b(c?dss|secondary|sec\.?|high school|acad[ae]my|open)\b/.test(text)) return "Secondary";
+  if (/\b(c?dss|secondary|sec\.?|high school|acad[ae]my|open|seminary)\b/.test(text)) return "Secondary";
   if (/\bj\.? ?p\b/.test(text)) return "Junior primary";
   if (/\bf\.? ?p\b|\bprimary\b|\bl\. ?e\. ?a\b/.test(text)) return "Primary";
   return "School";
+}
+
+// "school", "primary school" or "secondary school" for the School level filter.
+export function schoolNoun(level) {
+  return { primary: "primary school", secondary: "secondary school" }[level] || "school";
 }
 
 // Fast planar distance (km); accurate to well under 1% across Dedza.

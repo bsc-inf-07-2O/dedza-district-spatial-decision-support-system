@@ -34,6 +34,7 @@ export async function estimateScenarioCandidate(candidate) {
       coordinates: candidate.point.geometry.coordinates,
       type: candidate.type,
       radius_km: candidate.radius,
+      school_level: candidate.schoolLevel || "all",
     }, "Population estimate");
     if (!Number.isFinite(result.additional_population_estimate)) {
       throw new Error("The population estimate response was incomplete.");
@@ -112,10 +113,13 @@ export async function addCandidateAt(latlng) {
     showNotice("Building occupies this site", message, "error", true);
     return;
   }
+  const type = scenarioTypeInput.value;
   const candidate = {
     id: state.nextScenarioId++,
     point,
-    type: scenarioTypeInput.value,
+    type,
+    // A school candidate keeps the level chosen in the Schools tool when it was placed.
+    schoolLevel: type === "school" ? state.schoolLevel : "all",
     radius,
     siteScreening,
     loading: true,

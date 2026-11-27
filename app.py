@@ -34,8 +34,9 @@ def warm_caches() -> None:
     """Prepare the road network and scenario baselines so the first site comparison is fast."""
     try:
         load_road_network()
-        for facility_type in ("health", "school"):
-            scenario_baseline_road_times(facility_type)
+        scenario_baseline_road_times("health")
+        for school_level in ("all", "primary", "secondary"):
+            scenario_baseline_road_times("school", school_level)
         settlement_planning()
         district_population_pixels()
         health_walking_area(config.HEALTH_WALKING_AREA_KM)

@@ -108,6 +108,7 @@
           </select>
           <label for="scenario-radius">Walking distance (km)</label>
           <input id="scenario-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="scenario-help" />
+          <p class="control-hint scenario-school-level" id="scenario-school-level" hidden></p>
           <p class="control-hint" id="scenario-help">Choose a facility type and radius, then let the system suggest the best sites or add your own candidates; sites are ranked by people newly brought within walking reach. Compare separate signals: WorldPop population within the radius as walking distance along roads and footpaths, settlements newly within 30- and 60-minute motorcycle road-time bands versus existing same-type services, and the affected TAs. Road times use indicative motorcycle speeds and exclude connector time, traffic and road conditions. Facility capacity data is unavailable and is not scored. Each candidate is assessed independently; field verification is needed.</p>
           <div class="scenario-actions">
             <button type="button" id="suggest-sites" class="primary-action" data-icon="spark" title="Find the 3 locations that would bring the most currently unserved people within the access radius">Suggest best sites</button>
@@ -143,7 +144,14 @@
       </div>
       <div class="tool-view" data-tool-view="schools" data-title="Schools" hidden>
         <section class="school-access-control">
-          <h2>School access radius</h2>
+          <h2>School access</h2>
+          <label for="school-level">School level</label>
+          <select id="school-level" aria-describedby="school-level-help">
+            <option value="all" data-meta="Every mapped school" selected>All schools</option>
+            <option value="primary" data-meta="Full and junior primary schools">Primary</option>
+            <option value="secondary" data-meta="CDSS, day, private and open secondary schools">Secondary</option>
+          </select>
+          <p class="control-hint" id="school-level-help">The level is read from each school's name. It also sets which schools a School candidate in New sites is compared with.</p>
           <label for="school-radius">Maximum walking distance (km)</label>
           <input id="school-radius" type="number" min="1" max="50" step="1" value="5" aria-describedby="school-radius-help" />
           <p class="control-hint" id="school-radius-help">After changing the value, click elsewhere to update. Counts update and settlement dots show which are within or beyond this distance; no school-radius circles are drawn. Turn on the Settlements map layer to see the dots.</p>
@@ -350,8 +358,8 @@
                 <th>Settlement</th>
                 <th>Traditional Authority</th>
                 <th>Est. population</th>
-                <th>Nearest school</th>
-                <th>School distance</th>
+                <th id="settlement-school-heading">Nearest school</th>
+                <th id="settlement-school-distance-heading">School distance</th>
                 <th>Nearest health facility</th>
                 <th>Health distance</th>
               </tr>

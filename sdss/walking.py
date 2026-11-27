@@ -21,6 +21,7 @@ from scripts.road_network import NodeIndex, shortest_costs
 
 from .data import db, load_payloads
 from .routing import load_road_network
+from .schools import level_group
 
 
 @lru_cache(maxsize=1)
@@ -33,10 +34,17 @@ def service_sites(kind: str) -> list[dict]:
     """Existing services that walking distance is measured to.
 
     Health uses the same 70 MOH facilities as the coverage grid (Dedza's own plus
-    those within 20 km across the border); schools are Dedza's schools.
+    those within 20 km across the border); schools are Dedza's schools, all of
+    them ("school") or one level ("school:primary", "school:secondary"). Each
+    school keeps its position in the full school list as "index".
     """
-    if kind == "school":
-        return [{"name": s["name"], "lon": s["lon"], "lat": s["lat"]} for s in load_payloads()["schools"]]
+    if kind.startswith("school"):
+        level = kind.partition(":")[2]
+        return [
+            {"index": i, "name": s["name"], "lon": s["lon"], "lat": s["lat"]}
+            for i, s in enumerate(load_payloads()["schools"])
+            if not level or level_group(s["name"]) == level
+        ]
     con = db()
     try:
         rows = con.execute("SELECT name, lon, lat, in_dedza FROM distance_facilities").fetchall()
@@ -47,7 +55,7 @@ def service_sites(kind: str) -> list[dict]:
     return [{"name": r["name"], "lon": r["lon"], "lat": r["lat"], "in_dedza": bool(r["in_dedza"])} for r in rows]
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def service_walk_costs(kind: str) -> tuple[list[dict], dict, dict]:
     """Walking distance (km) from every network node to the nearest service of
     `kind`, including the walk from each service to its nearest node, and which

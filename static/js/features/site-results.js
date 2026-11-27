@@ -1,8 +1,8 @@
 // Candidate sites on the map and the "Candidate results" cards beside it.
-import { data } from "../data.js";
+import { data, nearestSchool, schoolsAtLevel } from "../data.js";
 import { layers, map, scenarioColors } from "../map/map.js";
 import { state } from "../state.js";
-import { nearPlace, quickKm } from "../ui/format.js";
+import { nearPlace, quickKm, schoolNoun } from "../ui/format.js";
 
 const scenarioStatus = document.getElementById("scenario-status");
 const clearScenarioButton = document.getElementById("clear-scenario");
@@ -11,11 +11,19 @@ const scenarioCandidateList = document.getElementById("scenario-candidate-list")
 const scenarioResultsSummary = document.getElementById("scenario-results-summary");
 const scenarioResultsToggle = document.getElementById("toggle-scenario-results");
 
-// Settlements within the candidate's radius before and after adding it.
+// "Health centre", "School", "Primary school" or "Secondary school".
+export function candidateLabel(candidate) {
+  if (candidate.type !== "school") return "Health centre";
+  const noun = schoolNoun(candidate.schoolLevel);
+  return `${noun[0].toUpperCase()}${noun.slice(1)}`;
+}
+
+// Settlements within the candidate's radius before and after adding it. A
+// school candidate is compared with existing schools of its own level.
 export function getScenarioMetrics(active, candidate = state.scenarios[0]) {
   if (!candidate) return null;
   const nearestService = candidate.type === "school"
-    ? data.nearestSchoolBySettlement
+    ? { get: (settlement) => nearestSchool(settlement, candidate.schoolLevel || "all") }
     : data.nearestFacilityBySettlement;
   let before = 0;
   let after = 0;
@@ -140,7 +148,7 @@ export function renderScenario(active) {
     const [lon, lat] = candidate.point.geometry.coordinates;
     const metrics = getScenarioMetrics(active, candidate);
     const color = scenarioColors[index % scenarioColors.length];
-    const label = candidate.type === "school" ? "School" : "Health centre";
+    const label = candidateLabel(candidate);
     // The shaded area is the real walking reach along roads and paths. Until
     // it is calculated, a faint straight-line circle marks the radius.
     const reachGeometry = candidate.populationEstimate?.walking_reach_geojson;
@@ -231,12 +239,16 @@ export function renderScenario(active) {
     }
 
     // Duplication check: is an existing service already close to this site?
-    const existingPool = candidate.type === "school" ? data.schools.features : data.registry.features;
+    const existingPool = candidate.type === "school"
+      ? schoolsAtLevel(data.schools.features, candidate.schoolLevel || "all")
+      : data.registry.features;
     const closest = nearestOf(existingPool, candidate.point.geometry.coordinates);
     if (closest) {
       const nearby = document.createElement("p");
       nearby.className = "scenario-screening-note";
-      const what = candidate.type === "school" ? "school" : "operational facility (MHFR registry, any owner)";
+      const what = candidate.type === "school"
+        ? schoolNoun(candidate.schoolLevel)
+        : "operational facility (MHFR registry, any owner)";
       const owner = candidate.type === "school" ? "" : closest.feature.properties.ownership ? ` · ${closest.feature.properties.ownership}` : "";
       nearby.textContent = `Nearest existing ${what}: ${closest.feature.properties.name}${owner}, ${closest.distance.toFixed(1)} km.`
         + (closest.distance < candidate.radius / 2 ? " Close enough to risk duplicating it; consider upgrading that site instead." : "");
@@ -271,7 +283,7 @@ export function renderScenario(active) {
 // The estimate part of a candidate card: population, site checks, road time, TAs.
 function appendEstimate(card, active, candidate, metrics) {
   const result = candidate.populationEstimate;
-  const existingServiceLabel = candidate.type === "school" ? "school" : "baseline health facility";
+  const existingServiceLabel = candidate.type === "school" ? schoolNoun(candidate.schoolLevel) : "baseline health facility";
   const gain = document.createElement("strong");
   gain.textContent = `${Math.round(result.additional_population_estimate).toLocaleString()} estimated additional residents in Dedza`;
   const detail = document.createElement("p");

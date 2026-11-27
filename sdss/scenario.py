@@ -25,6 +25,7 @@ from .routing import (
     nearest_road_node,
     road_times_to_sources,
 )
+from .schools import level_group, service_kind
 from .walking import (
     service_walk_costs,
     settlement_nodes,
@@ -32,6 +33,10 @@ from .walking import (
     walking_index,
     walking_reach,
 )
+
+
+def school_service_label(school_level: str) -> str:
+    return {"primary": "primary school", "secondary": "secondary school"}.get(school_level, "school")
 
 
 # ---------------------------------------------------------------------------
@@ -78,13 +83,15 @@ def district_population_pixels() -> dict:
     }
 
 
-def estimate_scenario_population(lon: float, lat: float, radius_km: float, facility_type: str) -> dict:
+def estimate_scenario_population(
+    lon: float, lat: float, radius_km: float, facility_type: str, school_level: str = "all"
+) -> dict:
     """Residents within `radius_km` walking distance of a candidate site.
 
     Walking distance runs along roads, tracks and paths: a straight walk from the
     pixel (or settlement) to its nearest path node, then the shortest route. A
     resident counts as newly reached when the candidate is within the radius and
-    no existing service of the same type is.
+    no existing service of the same type (for schools, the same `school_level`) is.
     """
     boundary_geometries = [feature["geometry"] for feature in load_payloads()["boundary"]["features"]]
     point_transform = Affine(1e-8, 0, lon - 0.5e-8, 0, -1e-8, lat + 0.5e-8)
@@ -93,9 +100,8 @@ def estimate_scenario_population(lon: float, lat: float, radius_km: float, facil
     if not config.WORLDPOP_PATH.is_file():
         raise FileNotFoundError(f"WorldPop raster not found: {config.WORLDPOP_PATH}")
 
-    kind = "school" if facility_type == "school" else "health"
     reach, candidate_snap = walking_reach((lon, lat), radius_km)
-    _, existing_costs, _ = service_walk_costs(kind)
+    _, existing_costs, _ = service_walk_costs(service_kind(facility_type, school_level))
     pixels = district_population_pixels()
     nodes = walking_index().nodes
 
@@ -138,7 +144,7 @@ def estimate_scenario_population(lon: float, lat: float, radius_km: float, facil
         max(0.1, radius_km / 50),
     )
 
-    service_label = "school" if facility_type == "school" else "baseline health facility"
+    service_label = school_service_label(school_level) if facility_type == "school" else "baseline health facility"
     return {
         "walking_reach_geojson": reach_geometry,
         "population_within_radius": round(total(within), 2),
@@ -162,14 +168,21 @@ def estimate_scenario_population(lon: float, lat: float, radius_km: float, facil
 # Road travel time to the site
 # ---------------------------------------------------------------------------
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def scenario_baseline_road_times(
     facility_type: str,
+    school_level: str = "all",
 ) -> dict[tuple[str, float, float], tuple[tuple[float, float], float, float | None]]:
     """Per settlement: nearest road node, snap distance and time to the nearest existing service."""
     payloads = load_payloads()
     graph, _, projected = load_road_network()
-    existing_sites = payloads["schools"] if facility_type == "school" else payloads["facilities"]
+    if facility_type == "school":
+        existing_sites = [
+            school for school in payloads["schools"]
+            if school_level == "all" or level_group(school["name"]) == school_level
+        ]
+    else:
+        existing_sites = payloads["facilities"]
     site_points = [(float(site["lon"]), float(site["lat"])) for site in existing_sites]
     site_nodes = [nearest_road_node(point, projected) for point in site_points]
     service_nodes = {
@@ -194,7 +207,7 @@ def scenario_baseline_road_times(
     return baselines
 
 
-def estimate_scenario_road_access(lon: float, lat: float, facility_type: str) -> dict:
+def estimate_scenario_road_access(lon: float, lat: float, facility_type: str, school_level: str = "all") -> dict:
     """Road travel time from each settlement to the candidate and to existing services."""
     graph, _, projected = load_road_network()
     candidate_point = (lon, lat)
@@ -223,7 +236,7 @@ def estimate_scenario_road_access(lon: float, lat: float, facility_type: str) ->
         return result
 
     payloads = load_payloads()
-    baseline_times = scenario_baseline_road_times(facility_type)
+    baseline_times = scenario_baseline_road_times(facility_type, school_level)
     # One search from the candidate gives every settlement's time to it.
     times_to_candidate = road_times_to_sources(graph, {candidate_node}, config.MAX_SCENARIO_TRAVEL_TIME_MIN)
     for settlement in payloads["settlements"]:
