@@ -1,9 +1,9 @@
 // Insights drawer content: the Briefing (KPIs, recommended actions, signals),
 // the Settlement access table, and the coverage bars in the tool panel.
-import { data } from "../data.js";
+import { data, nearestSchool } from "../data.js";
 import { map } from "../map/map.js";
 import { state } from "../state.js";
-import { escapeHtml, formatMinutes, formatShare, growthText, nearPlace, plural, travelTimeTone } from "../ui/format.js";
+import { escapeHtml, formatMinutes, formatShare, growthText, nearPlace, plural, schoolNoun, travelTimeTone } from "../ui/format.js";
 import { cachedSuggestion } from "./suggestions.js";
 import { taRanking } from "./ta.js";
 
@@ -47,11 +47,11 @@ export function renderBriefing(active, metrics) {
     [formatMinutes(averageTravel), "Average road travel time to care"],
     [formatShare(cellTotals.population ? cellTotals.nearRoad / cellTotals.population : 0), `Residents within ${roadAccessKm} km of a classified road`],
     [`${metrics.healthGaps}/${active.settlements.length}`, "Settlements > 5 km walk from baseline health"],
-    [`${metrics.schoolReach}/${active.settlements.length}`, `Settlements within ${schoolRadiusKm} km of school`],
+    [`${metrics.schoolReach}/${active.settlements.length}`, `Settlements within ${schoolRadiusKm} km of a ${schoolNoun(state.schoolLevel)}`],
   ].map(([value, label]) => `<div class="briefing-kpi"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
   const signals = [
     `<strong>Health access:</strong> ${metrics.unservedCells} grid cells (${metrics.unservedArea.toFixed(0)} km²) are beyond the 8 km baseline threshold.`,
-    `<strong>Education proximity:</strong> ${metrics.schoolReach} of ${active.settlements.length} mapped settlements are within ${schoolRadiusKm} km walking distance of a school.`,
+    `<strong>Education proximity:</strong> ${metrics.schoolReach} of ${active.settlements.length} mapped settlements are within ${schoolRadiusKm} km walking distance of a ${schoolNoun(state.schoolLevel)}.`,
     `<strong>Travel and roads:</strong> residents average ${escapeHtml(formatMinutes(averageTravel))} by road to the nearest facility; ${formatShare(cellTotals.population ? cellTotals.nearRoad / cellTotals.population : 0)} live within ${roadAccessKm} km of a classified road.`,
     `<strong>Flood exposure:</strong> about ${Math.round(cellTotals.flooded).toLocaleString()} residents live in the 1-in-100-year river flood zone (JRC GloFAS).`,
     `<strong>Facility sources:</strong> ${active.facilities.length} baseline facilities inform the access grid; ${active.registry.features.length} operational facilities from the official MHFR registry are shown separately.`,
@@ -121,17 +121,22 @@ export function buildRecommendedActions(active) {
     actions.push({ text, html: `<strong>Outreach until a facility is built:</strong> the largest settlements beyond 8 km are ${htmlList.join("; ")}.` });
   }
 
-  const schoolSite = cachedSuggestion("school", schoolRadiusKm);
+  // School advice follows the School level filter (all, primary or secondary).
+  const { schoolLevel } = state;
+  const noun = schoolNoun(schoolLevel);
+  const schoolSite = cachedSuggestion("school", schoolRadiusKm, schoolLevel);
   const schoolGapPeople = active.settlements
-    .filter((settlement) => (data.nearestSchoolBySettlement.get(settlement)?.distance ?? Infinity) > schoolRadiusKm)
+    .filter((settlement) => (nearestSchool(settlement)?.distance ?? Infinity) > schoolRadiusKm)
     .reduce((sum, settlement) => sum + (Number(settlement.properties.population) || 0), 0);
   if (schoolSite && schoolGapPeople >= 1000) {
-    const text = `Assess a new school ${nearPlace(schoolSite.name)}: it would bring about ${fmt(schoolSite.people)} people (2030) in ${plural(schoolSite.settlement_count, "settlement")} within a ${schoolRadiusKm} km walk of a school.`;
-    actions.push({ text, html: `<strong>Best school location:</strong> ${escapeHtml(nearPlace(schoolSite.name))}, bringing about ${fmt(schoolSite.people)} people (2030) in ${plural(schoolSite.settlement_count, "settlement")} within a ${schoolRadiusKm} km walk of a school. ${button("Compare top 3 sites", `data-action="suggest" data-value="school" data-radius="${schoolRadiusKm}"`)}` });
+    const text = `Assess a new ${noun} ${nearPlace(schoolSite.name)}: it would bring about ${fmt(schoolSite.people)} people (2030) in ${plural(schoolSite.settlement_count, "settlement")} within a ${schoolRadiusKm} km walk of a ${noun}.`;
+    actions.push({ text, html: `<strong>Best ${escapeHtml(noun)} location:</strong> ${escapeHtml(nearPlace(schoolSite.name))}, bringing about ${fmt(schoolSite.people)} people (2030) in ${plural(schoolSite.settlement_count, "settlement")} within a ${schoolRadiusKm} km walk of a ${escapeHtml(noun)}. ${button("Compare top 3 sites", `data-action="suggest" data-value="school" data-radius="${schoolRadiusKm}"`)}` });
+  } else if (schoolSite === undefined && schoolGapPeople >= 1000) {
+    actions.push({ text: `Calculating the best ${noun} location…`, html: `<strong>Best ${escapeHtml(noun)} location:</strong> calculating walking reach…` });
   } else {
     const text = schoolGapPeople > 0
-      ? `Only about ${fmt(schoolGapPeople)} people in mapped settlements live more than a ${schoolRadiusKm} km walk from a school, so new school sites are not the main gap here; direct education funds to classrooms, teachers and quality. Lower the School access radius to test a stricter standard.`
-      : `Every mapped settlement is within a ${schoolRadiusKm} km walk of a school; direct education funds to classrooms, teachers and quality rather than new sites.`;
+      ? `Only about ${fmt(schoolGapPeople)} people in mapped settlements live more than a ${schoolRadiusKm} km walk from a ${noun}, so new ${noun} sites are not the main gap here; direct education funds to classrooms, teachers and quality. Lower the School access radius to test a stricter standard.`
+      : `Every mapped settlement is within a ${schoolRadiusKm} km walk of a ${noun}; direct education funds to classrooms, teachers and quality rather than new sites.`;
     actions.push({ text, html: `<strong>Schools:</strong> ${escapeHtml(text)}` });
   }
 
@@ -147,7 +152,7 @@ export function renderSchoolProfile(areaSettlements) {
   profile.replaceChildren();
   thresholds.forEach((threshold) => {
     const covered = areaSettlements.filter(
-      (settlement) => (data.nearestSchoolBySettlement.get(settlement)?.distance ?? Infinity) <= threshold
+      (settlement) => (nearestSchool(settlement)?.distance ?? Infinity) <= threshold
     ).length;
     const percent = areaSettlements.length ? covered / areaSettlements.length * 100 : 0;
     const item = document.createElement("div");
@@ -184,8 +189,12 @@ export function renderSettlementAccess(areaSettlements) {
   tbody.replaceChildren();
   const ordered = [...areaSettlements].sort((a, b) =>
     (data.nearestFacilityBySettlement.get(b)?.distance ?? Infinity) - (data.nearestFacilityBySettlement.get(a)?.distance ?? Infinity));
+  const noun = schoolNoun(state.schoolLevel);
+  document.getElementById("settlement-school-heading").textContent = `Nearest ${noun}`;
+  document.getElementById("settlement-school-distance-heading").textContent =
+    `${noun[0].toUpperCase()}${noun.slice(1)} distance`;
   ordered.forEach((settlement) => {
-    const school = data.nearestSchoolBySettlement.get(settlement);
+    const school = nearestSchool(settlement);
     const facility = data.nearestFacilityBySettlement.get(settlement);
     const [lon, lat] = settlement.geometry.coordinates;
     const population = Number(settlement.properties.population) || 0;
@@ -195,7 +204,7 @@ export function renderSettlementAccess(areaSettlements) {
         <td>${escapeHtml(settlement.properties.name)}</td>
         <td>${escapeHtml(settlement.properties.adm3_name)}</td>
         <td>${population ? Math.round(population).toLocaleString() : "—"}</td>
-        <td>${escapeHtml(school?.school.properties.name || "No mapped school")}</td>
+        <td>${escapeHtml(school?.school.properties.name || `No mapped ${noun}`)}</td>
         <td>${school ? `${school.distance.toFixed(1)} km` : "—"}</td>
         <td>${escapeHtml(facility?.facility.name || "No mapped facility")}</td>
         <td>${facility ? `${facility.distance.toFixed(1)} km` : "—"}</td>`;

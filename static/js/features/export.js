@@ -1,24 +1,28 @@
 // "Export planning CSV": the selected area's summary, recommendations,
 // candidate sites and per-settlement distances as one CSV file.
-import { data } from "../data.js";
+import { data, nearestSchool, schoolsAtLevel } from "../data.js";
 import { state } from "../state.js";
-import { csvField, nearPlace } from "../ui/format.js";
+import { csvField, nearPlace, schoolNoun } from "../ui/format.js";
 import { activeData } from "./area.js";
 import { buildRecommendedActions } from "./briefing.js";
-import { getScenarioMetrics } from "./site-results.js";
+import { candidateLabel, getScenarioMetrics } from "./site-results.js";
 
 function exportPlanningBrief() {
   const { siteLayers } = data;
   const active = activeData();
   const areaLabel = state.name || "Dedza District";
+  // School columns and figures follow the Schools tool's level filter.
+  const schoolLevelLabel = { all: "All schools", primary: "Primary", secondary: "Secondary" }[state.schoolLevel];
+  const noun = schoolNoun(state.schoolLevel);
   const rows = [[
     "section", "area", "metric", "value", "settlement", "osm_adm3_label",
     "nearest_school", "school_distance_km", "nearest_health_facility", "health_distance_km",
+    "nearest_school_level",
   ]];
   const schoolCoverage = [1, 3, 5, 8].map((threshold) => [
     threshold,
     active.settlements.filter(
-      (settlement) => (data.nearestSchoolBySettlement.get(settlement)?.distance ?? Infinity) <= threshold
+      (settlement) => (nearestSchool(settlement)?.distance ?? Infinity) <= threshold
     ).length,
   ]);
   const healthGaps = active.settlements.filter(
@@ -28,7 +32,8 @@ function exportPlanningBrief() {
   const population = data.populationByArea.get(areaLabel) || {};
   const totalPopulation = population.total || 0;
   const unservedPopulation = population.unserved || 0;
-  rows.push(["summary", areaLabel, "schools", active.schools.length]);
+  rows.push(["summary", areaLabel, "school level analysed", schoolLevelLabel]);
+  rows.push(["summary", areaLabel, state.schoolLevel === "all" ? "schools" : `${noun}s`, schoolsAtLevel(active.schools).length]);
   rows.push(["summary", areaLabel, "health facilities", active.facilities.length]);
   rows.push(["summary", areaLabel, "MHFR registry facilities (operational)", active.registry.features.length]);
   rows.push(["summary", areaLabel, "mapped settlements", active.settlements.length]);
@@ -50,7 +55,7 @@ function exportPlanningBrief() {
       : "Unavailable; occupancy not screened",
   ]);
   schoolCoverage.forEach(([threshold, count]) => {
-    rows.push(["school coverage", areaLabel, `settlements within ${threshold} km`, `${count}/${active.settlements.length}`]);
+    rows.push(["school coverage", areaLabel, `settlements within ${threshold} km of a ${noun}`, `${count}/${active.settlements.length}`]);
   });
   buildRecommendedActions(active).forEach((action, index) => {
     rows.push(["recommendation", areaLabel, `action ${index + 1}`, action.text]);
@@ -68,7 +73,7 @@ function exportPlanningBrief() {
   state.scenarios.forEach((candidate) => {
     const label = `candidate ${candidate.id}`;
     const metrics = getScenarioMetrics(active, candidate);
-    rows.push(["scenario", areaLabel, `${label} facility type`, candidate.type === "school" ? "School" : "Health centre"]);
+    rows.push(["scenario", areaLabel, `${label} facility type`, candidateLabel(candidate)]);
     rows.push([
       "site screening",
       areaLabel,
@@ -103,7 +108,7 @@ function exportPlanningBrief() {
   });
 
   active.settlements.forEach((settlement) => {
-    const school = data.nearestSchoolBySettlement.get(settlement);
+    const school = nearestSchool(settlement);
     const facility = data.nearestFacilityBySettlement.get(settlement);
     rows.push([
       "settlement", areaLabel, "nearest-service distances", "walking km along roads and paths",
@@ -113,6 +118,7 @@ function exportPlanningBrief() {
       school?.distance.toFixed(2) || "",
       facility?.facility.name || "",
       facility?.distance.toFixed(2) || "",
+      school?.school.properties.level || "",
     ]);
   });
 

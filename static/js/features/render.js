@@ -1,9 +1,9 @@
 // render(active): redraw every map layer, summary and table for the selected
 // area. Called whenever the area, a threshold, a weight or a candidate changes.
-import { data } from "../data.js";
+import { data, nearestSchool, schoolsAtLevel } from "../data.js";
 import { layers, mapSymbol, roadWeight, selectedBoundary } from "../map/map.js";
 import { state } from "../state.js";
-import { escapeHtml, schoolLevel } from "../ui/format.js";
+import { escapeHtml, schoolLevel, schoolNoun } from "../ui/format.js";
 import { POPUP_OPTIONS, popupCard } from "../ui/popup.js";
 import { clippedCellArea } from "./area.js";
 import { renderBriefing, renderPopulationProfile, renderSchoolProfile, renderSettlementAccess } from "./briefing.js";
@@ -83,7 +83,8 @@ function drawReferenceLayers(active) {
   });
   drawHealthWalkingArea();
 
-  active.schools.forEach((school) => {
+  // Only schools of the chosen level (Schools → School level) are drawn.
+  schoolsAtLevel(active.schools).forEach((school) => {
     const [lon, lat] = school.geometry.coordinates;
     L.marker([lat, lon], {
       icon: mapSymbol("square", "#f4a261", "#873e2e", 8),
@@ -91,7 +92,7 @@ function drawReferenceLayers(active) {
       .bindPopup(popupCard({
         kicker: "School",
         title: school.properties.name,
-        badge: { text: schoolLevel(school.properties.name), tone: "school" },
+        badge: { text: school.properties.level || schoolLevel(school.properties.name), tone: "school" },
         rows: [["School ID", school.properties.school_id], ["Status", school.properties.status]],
         actions: [
           { action: "zoom", label: "Zoom in", icon: "zoom", data: { lat, lng: lon, zoom: 14 } },
@@ -103,7 +104,7 @@ function drawReferenceLayers(active) {
   active.settlements.forEach((settlement) => {
     const [lon, lat] = settlement.geometry.coordinates;
     const population = settlement.properties.population;
-    const nearest = data.nearestSchoolBySettlement.get(settlement);
+    const nearest = nearestSchool(settlement);
     const nearestFacility = data.nearestFacilityBySettlement.get(settlement);
     const withinSchoolRadius = nearest && nearest.distance <= schoolRadiusKm;
     const status = withinSchoolRadius ? "Within" : "Beyond";
@@ -119,11 +120,11 @@ function drawReferenceLayers(active) {
       .bindPopup(popupCard({
         kicker: `${settlement.properties.place || "Settlement"} · ${settlement.properties.adm3_name || "Dedza"}`,
         title: settlement.properties.name,
-        badge: { text: `${status} ${schoolRadiusKm} km of a school`, tone: withinSchoolRadius ? "served" : "unserved" },
+        badge: { text: `${status} ${schoolRadiusKm} km of a ${schoolNoun(state.schoolLevel)}`, tone: withinSchoolRadius ? "served" : "unserved" },
         rows: [
           ["Est. population (WorldPop 2025)", population ? Math.round(population).toLocaleString() : null],
           ["Buildings (GRID3)", buildings ? Number(buildings).toLocaleString() : null],
-          ["Nearest school", nearest ? `${nearest.school.properties.name} (${nearest.distance.toFixed(1)} km)` : "none mapped"],
+          [`Nearest ${schoolNoun(state.schoolLevel)}`, nearest ? `${nearest.school.properties.name} (${nearest.distance.toFixed(1)} km)` : "none mapped"],
           ["Nearest health facility", nearestFacility
             ? `${nearestFacility.facility.name} (${nearestFacility.distance.toFixed(1)} km)`
             : "none mapped"],
@@ -152,7 +153,7 @@ function renderSummaries(active) {
   }, { area: 0, distance: 0, served: 0, underserved: 0, unserved: 0, unservedCells: 0 });
   const meanDistance = areaStats.area ? areaStats.distance / areaStats.area : 0;
   const schoolDistances = active.settlements
-    .map((settlement) => data.nearestSchoolBySettlement.get(settlement)?.distance)
+    .map((settlement) => nearestSchool(settlement)?.distance)
     .filter((distance) => Number.isFinite(distance));
   const healthDistances = active.settlements
     .map((settlement) => data.nearestFacilityBySettlement.get(settlement)?.distance)
@@ -178,8 +179,10 @@ function renderSummaries(active) {
     .sort((a, b) => cellScore(b.properties) - cellScore(a.properties))
     .slice(0, 3);
   const schoolReach = active.settlements.filter(
-    (settlement) => (data.nearestSchoolBySettlement.get(settlement)?.distance ?? Infinity) <= schoolRadiusKm
+    (settlement) => (nearestSchool(settlement)?.distance ?? Infinity) <= schoolRadiusKm
   ).length;
+  const noun = schoolNoun(state.schoolLevel);
+  const levelSchools = schoolsAtLevel(active.schools).length;
   renderSchoolProfile(active.settlements);
   renderPopulationProfile(population);
   renderSettlementAccess(active.settlements);
@@ -193,10 +196,10 @@ function renderSummaries(active) {
   document.getElementById("kpis").innerHTML = [
     kpi("Health facilities · baseline", active.facilities.length),
     kpi("Health facilities · MHFR registry", active.registry.features.length),
-    kpi("Schools", active.schools.length),
+    kpi(state.schoolLevel === "all" ? "Schools" : `${noun[0].toUpperCase()}${noun.slice(1)}s`, levelSchools),
     kpi("Settlements", active.settlements.length),
-    kpi(`Settlements within ${schoolRadiusKm} km of a school`, `${withinSchoolRadius}/${schoolDistances.length}`),
-    kpi("Mean nearest-school distance", `${meanSchoolDistance.toFixed(1)} km`),
+    kpi(`Settlements within ${schoolRadiusKm} km of a ${noun}`, `${withinSchoolRadius}/${schoolDistances.length}`),
+    kpi(`Mean nearest-${noun} distance`, `${meanSchoolDistance.toFixed(1)} km`),
     kpi("Settlements > 5 km walk from health", `${beyondHealthRadius}/${healthDistances.length}`),
     kpi("Mean nearest-health distance", `${meanHealthDistance.toFixed(1)} km`),
     kpi("WorldPop 2025 estimate", Math.round(populationTotal).toLocaleString()),
@@ -209,8 +212,8 @@ function renderSummaries(active) {
   ].join("");
 
   const areaLabel = state.name ? escapeHtml(state.name) : "Dedza District";
-  areaStatus.textContent = `${areaLabel} · ${active.schools.length} schools · ${active.facilities.length} baseline / ${active.registry.features.length} MHFR registry facilities · ${withinSchoolRadius}/${schoolDistances.length} settlements within ${schoolRadiusKm} km of school · ${beyondHealthRadius}/${healthDistances.length} settlements > 5 km from baseline health`;
-  document.getElementById("school-access-status").textContent = `Updated: ${withinSchoolRadius} of ${schoolDistances.length} mapped settlements are within ${schoolRadiusKm} km of a school; settlement dots show within/beyond this threshold.`;
+  areaStatus.textContent = `${areaLabel} · ${levelSchools} ${noun}s · ${active.facilities.length} baseline / ${active.registry.features.length} MHFR registry facilities · ${withinSchoolRadius}/${schoolDistances.length} settlements within ${schoolRadiusKm} km of a ${noun} · ${beyondHealthRadius}/${healthDistances.length} settlements > 5 km from baseline health`;
+  document.getElementById("school-access-status").textContent = `Updated: ${withinSchoolRadius} of ${schoolDistances.length} mapped settlements are within ${schoolRadiusKm} km walking distance of a ${noun}; settlement dots show within/beyond this threshold.`;
 }
 
 function kpi(label, value) {

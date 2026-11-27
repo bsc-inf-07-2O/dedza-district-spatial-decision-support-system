@@ -12,6 +12,7 @@ from ..geo import valid_lon_lat
 from ..planning import suggest_sites
 from ..routing import RouteEndpointTooFar, RouteNetworkUnavailable, calculate_road_route
 from ..scenario import estimate_scenario_population, estimate_scenario_road_access
+from ..schools import SCHOOL_LEVELS
 
 bp = Blueprint("sites", __name__, url_prefix="/api")
 
@@ -20,6 +21,12 @@ FACILITY_TYPES = ("school", "health")
 
 def _error(message: str, status: int = 400):
     return jsonify({"error": message}), status
+
+
+def _school_level(data: dict) -> str | None:
+    """Optional "school_level" in a request body; None when it is invalid."""
+    level = data.get("school_level", "all")
+    return level if level in SCHOOL_LEVELS else None
 
 
 def _valid_radius(radius: object) -> bool:
@@ -107,15 +114,18 @@ def scenario_population():
     radius = data.get("radius_km")
     if not _valid_radius(radius):
         return _error("radius_km must be a number between 1 and 50.")
+    school_level = _school_level(data)
+    if school_level is None:
+        return _error('school_level must be "all", "primary" or "secondary".')
     try:
-        estimate = estimate_scenario_population(*coordinates, float(radius), facility_type)
+        estimate = estimate_scenario_population(*coordinates, float(radius), facility_type, school_level)
     except ValueError as error:
         return _error(str(error))
     except FileNotFoundError as error:
         return _error(str(error), 503)
     estimate["site_suitability"] = site_checker().check(*coordinates)
     try:
-        estimate["road_time_access"] = estimate_scenario_road_access(*coordinates, facility_type)
+        estimate["road_time_access"] = estimate_scenario_road_access(*coordinates, facility_type, school_level)
     except (FileNotFoundError, RouteNetworkUnavailable) as error:
         estimate["road_time_access"] = {
             "available": False,
@@ -142,8 +152,13 @@ def suggested_sites():
     count = data.get("count", 3)
     if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10:
         return _error("count must be an integer between 1 and 10.")
+    school_level = _school_level(data)
+    if school_level is None:
+        return _error('school_level must be "all", "primary" or "secondary".')
     try:
-        picks = suggest_sites(facility_type, float(radius), data.get("area") or None, exclude, count)
+        picks = suggest_sites(
+            facility_type, float(radius), data.get("area") or None, exclude, count, school_level
+        )
     except ValueError as error:
         return _error(str(error))
     return jsonify({

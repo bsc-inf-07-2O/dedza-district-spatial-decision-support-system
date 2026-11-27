@@ -11,6 +11,7 @@ from .. import config
 from ..data import buildings_in_bbox, load_payloads, load_traditional_authorities, site_layer_status
 from ..planning import settlement_planning
 from ..routing import RouteNetworkUnavailable
+from ..schools import level_group, school_level
 from ..tiles import render_tile
 from ..walking import health_walking_area
 
@@ -100,6 +101,8 @@ def schools():
                 "school_id": school["school_id"],
                 "status": school["status"] or "",
                 "district": school["district"] or "",
+                "level": school_level(school["name"]),
+                "level_group": level_group(school["name"]),
             },
             school["lon"],
             school["lat"],

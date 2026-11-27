@@ -3,10 +3,10 @@
 // element (for example the map container's capture-phase click handlers).
 import { baseTilesFailed, mapStatus } from "./map/map.js";
 
-import { data, loadData } from "./data.js";
+import { data, loadData, schoolsAtLevel } from "./data.js";
 import { initState, state } from "./state.js";
 import { enhanceSelect } from "./ui/custom-select.js";
-import { escapeHtml } from "./ui/format.js";
+import { escapeHtml, schoolNoun } from "./ui/format.js";
 import { setupNotice } from "./ui/notice.js";
 import { enhanceNumberInput } from "./ui/number-input.js";
 import { setupRangeFills } from "./ui/range.js";
@@ -23,8 +23,9 @@ import { setupSiteControls } from "./features/sites.js";
 import { setupSuggestions } from "./features/suggestions.js";
 import { buildTAComparison, populateTASelect, renderTAComparison } from "./features/ta.js";
 
-// Schools tool: the walking-distance threshold for "within reach of a school".
-function setupSchoolRadius() {
+// Schools tool: which schools count (level) and the walking-distance threshold
+// for "within reach of a school".
+function setupSchoolControls() {
   const schoolRadiusInput = document.getElementById("school-radius");
   schoolRadiusInput.addEventListener("change", () => {
     const value = Number(schoolRadiusInput.value);
@@ -35,6 +36,31 @@ function setupSchoolRadius() {
     state.schoolRadiusKm = value;
     render(activeData());
   });
+
+  const levelSelect = document.getElementById("school-level");
+  const scenarioType = document.getElementById("scenario-type");
+  const scenarioLevelNote = document.getElementById("scenario-school-level");
+  const all = data.schools.features.length;
+  const primary = schoolsAtLevel(data.schools.features, "primary").length;
+  const secondary = schoolsAtLevel(data.schools.features, "secondary").length;
+  document.getElementById("school-level-help").textContent =
+    `Read from each school's name: ${primary} primary and ${secondary} secondary of ${all} schools. `
+    + `${all - primary - secondary} names give no level and count only under All schools. `
+    + "The level also sets which schools a School candidate in New sites is compared with.";
+
+  const updateScenarioNote = () => {
+    scenarioLevelNote.hidden = scenarioType.value !== "school";
+    scenarioLevelNote.textContent = state.schoolLevel === "all"
+      ? "School candidates are compared with all existing schools. Choose Primary or Secondary under Schools → School level."
+      : `School candidates are proposed as ${schoolNoun(state.schoolLevel)}s and compared with existing ${schoolNoun(state.schoolLevel)}s (Schools → School level).`;
+  };
+  levelSelect.addEventListener("change", () => {
+    state.schoolLevel = levelSelect.value;
+    updateScenarioNote();
+    render(activeData());
+  });
+  scenarioType.addEventListener("change", updateScenarioNote);
+  updateScenarioNote();
 }
 
 async function init() {
@@ -53,7 +79,7 @@ async function init() {
 
   // Form controls
   fillRouteOptions();
-  ["ta-select", "route-mode", "route-settlement", "route-facility", "scenario-type"]
+  ["ta-select", "route-mode", "route-settlement", "route-facility", "scenario-type", "school-level"]
     .forEach((id) => enhanceSelect(document.getElementById(id)));
   ["school-radius", "scenario-radius"]
     .forEach((id) => enhanceNumberInput(document.getElementById(id)));
@@ -67,7 +93,7 @@ async function init() {
   setupExport();
   setupGapAnalysis();
   setupPriorityWeights();
-  setupSchoolRadius();
+  setupSchoolControls();
 
   // First render: TA ranking, the whole district, then the map is ready.
   document.getElementById("sources").textContent = `Sources: ${data.summary.meta.sources}`;
