@@ -52,6 +52,8 @@
   cursor: pointer;
 }
 .scenario-results-header button:hover { border-color: var(--results-panel-summary); background: var(--results-panel-summary); }
+.scenario-results-header button:disabled { opacity: 0.55; cursor: wait; }
+.scenario-results-header button:disabled:hover { border-color: var(--results-panel-border); background: var(--results-panel-border); }
 
 /* One card per candidate, coloured by its map marker */
 .scenario-candidate-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }

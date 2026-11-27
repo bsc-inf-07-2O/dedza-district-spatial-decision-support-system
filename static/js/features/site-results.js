@@ -10,6 +10,7 @@ const scenarioResults = document.getElementById("scenario-results");
 const scenarioCandidateList = document.getElementById("scenario-candidate-list");
 const scenarioResultsSummary = document.getElementById("scenario-results-summary");
 const scenarioResultsToggle = document.getElementById("toggle-scenario-results");
+const downloadSitesButton = document.getElementById("download-sites-geojson");
 
 // Settlements within the candidate's radius before and after adding it.
 export function getScenarioMetrics(active, candidate = state.scenarios[0]) {
@@ -47,6 +48,32 @@ function nearestOf(features, coordinates) {
     if (!best || distance < best.distance) best = { feature, distance };
   });
   return best;
+}
+
+// Nearest existing service of the candidate's type: a school, or an
+// operational MHFR registry facility of any owner. Used for the duplication check.
+export function nearestExistingService(candidate) {
+  const pool = candidate.type === "school" ? data.schools.features : data.registry.features;
+  return nearestOf(pool, candidate.point.geometry.coordinates);
+}
+
+// Residents newly brought within reach by 2030 (WorldPop projection), falling
+// back to today's estimate when no projection is available.
+export function reach2030(candidate) {
+  return candidate.populationEstimate.additional_population_2030
+    ?? candidate.populationEstimate.additional_population_estimate;
+}
+
+export function isSuitable(candidate) {
+  return candidate.populationEstimate.site_suitability?.suitable !== false;
+}
+
+// Estimated candidates in ranked order: physically suitable sites first,
+// then by residents newly reached by 2030.
+export function rankScenarios() {
+  return state.scenarios
+    .filter((candidate) => candidate.populationEstimate)
+    .sort((a, b) => (isSuitable(b) - isSuitable(a)) || (reach2030(b) - reach2030(a)));
 }
 
 // Settlements newly within the 30- and 60-minute road-time bands.
@@ -117,6 +144,7 @@ export function renderScenario(active) {
     state.scenarioResultsCollapsed ? "Expand candidate results" : "Minimize candidate results"
   );
   clearScenarioButton.disabled = state.scenarios.length === 0 && !state.placingScenario;
+  downloadSitesButton.disabled = state.scenarios.some((candidate) => candidate.loading);
   if (!state.scenarios.length) {
     scenarioResultsSummary.textContent = "";
     scenarioStatus.textContent = state.placingScenario
@@ -125,14 +153,7 @@ export function renderScenario(active) {
     return;
   }
 
-  // Rank estimated candidates: physically suitable sites first, then by the
-  // residents newly brought within reach by 2030 (WorldPop projection).
-  const reach2030 = (candidate) =>
-    candidate.populationEstimate.additional_population_2030 ?? candidate.populationEstimate.additional_population_estimate;
-  const isSuitable = (candidate) => candidate.populationEstimate.site_suitability?.suitable !== false;
-  const rankedCandidates = state.scenarios
-    .filter((candidate) => candidate.populationEstimate)
-    .sort((a, b) => (isSuitable(b) - isSuitable(a)) || (reach2030(b) - reach2030(a)));
+  const rankedCandidates = rankScenarios();
   const rankById = new Map(rankedCandidates.map((candidate, rank) => [candidate.id, rank + 1]));
   const showRanks = rankedCandidates.length > 1;
 
@@ -231,8 +252,7 @@ export function renderScenario(active) {
     }
 
     // Duplication check: is an existing service already close to this site?
-    const existingPool = candidate.type === "school" ? data.schools.features : data.registry.features;
-    const closest = nearestOf(existingPool, candidate.point.geometry.coordinates);
+    const closest = nearestExistingService(candidate);
     if (closest) {
       const nearby = document.createElement("p");
       nearby.className = "scenario-screening-note";
