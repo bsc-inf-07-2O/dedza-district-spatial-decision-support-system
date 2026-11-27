@@ -5,7 +5,7 @@ import { state } from "../state.js";
 import { csvField, nearPlace } from "../ui/format.js";
 import { activeData } from "./area.js";
 import { buildRecommendedActions } from "./briefing.js";
-import { getScenarioMetrics } from "./site-results.js";
+import { getScenarioMetrics, nearestExistingService, rankScenarios } from "./site-results.js";
 
 function exportPlanningBrief() {
   const { siteLayers } = data;
@@ -117,10 +117,18 @@ function exportPlanningBrief() {
   });
 
   const csv = `﻿${rows.map((row) => row.map(csvField).join(",")).join("\r\n")}`;
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  downloadFile(csv, "text/csv;charset=utf-8", `${fileSlug(areaLabel)}-planning-brief.csv`);
+}
+
+function fileSlug(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function downloadFile(content, type, filename) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${areaLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-planning-brief.csv`;
+  link.download = filename;
   link.hidden = true;
   document.body.append(link);
   link.click();
@@ -128,7 +136,64 @@ function exportPlanningBrief() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+const roundOrNull = (value) => (value == null ? null : Math.round(value));
+
+// One GeoJSON Point feature per candidate site (WGS 84 longitude/latitude, as
+// RFC 7946 requires), with the figures from its results card as properties.
+function candidateFeature(candidate, rank) {
+  const estimate = candidate.populationEstimate;
+  const nearest = nearestExistingService(candidate);
+  const suitability = estimate?.site_suitability;
+  const [lon, lat] = candidate.point.geometry.coordinates;
+  return {
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [Number(lon.toFixed(6)), Number(lat.toFixed(6))] },
+    properties: {
+      id: candidate.id,
+      type: candidate.type === "school" ? "School" : "Health centre",
+      radius_km: candidate.radius,
+      rank: rank ?? null,
+      origin: candidate.suggestion ? "Suggested by the system" : "Placed by the user",
+      suggested_near: candidate.suggestion ? candidate.suggestion.name : null,
+      additional_people_2025: roundOrNull(estimate?.additional_population_estimate),
+      additional_people_2030: roundOrNull(estimate?.additional_population_2030),
+      people_within_radius: roundOrNull(estimate?.population_within_radius),
+      already_served_within_radius: roundOrNull(estimate?.already_within_existing_service_radius),
+      site_suitable: suitability ? suitability.suitable : null,
+      site_issues: suitability
+        ? suitability.checks.filter((check) => check.status === "fail" || check.status === "warn").map((check) => `${check.label}: ${check.detail}`).join("; ") || null
+        : null,
+      nearest_existing: nearest ? nearest.feature.properties.name : null,
+      nearest_existing_owner: candidate.type === "school" ? null : nearest?.feature.properties.ownership || null,
+      nearest_existing_km: nearest ? Number(nearest.distance.toFixed(2)) : null,
+      traditional_authorities: estimate
+        ? estimate.by_traditional_authority.map((area) => area.name).join("; ") || null
+        : null,
+      estimate_status: estimate ? "estimated" : candidate.populationError ? `unavailable: ${candidate.populationError}` : "pending",
+    },
+  };
+}
+
+// "GeoJSON" in the Candidate results panel: every candidate site as a map file
+// that opens in QGIS or ArcGIS.
+function exportCandidateSites() {
+  if (!state.scenarios.length) return;
+  const rankById = new Map(rankScenarios().map((candidate, index) => [candidate.id, index + 1]));
+  const collection = {
+    type: "FeatureCollection",
+    name: "dd_sdss_candidate_sites",
+    features: state.scenarios.map((candidate) => candidateFeature(candidate, rankById.get(candidate.id))),
+  };
+  const areaLabel = state.name || "Dedza District";
+  downloadFile(
+    JSON.stringify(collection, null, 2),
+    "application/geo+json",
+    `${fileSlug(areaLabel)}-candidate-sites.geojson`
+  );
+}
+
 export function setupExport() {
   document.getElementById("export-brief").addEventListener("click", exportPlanningBrief);
+  document.getElementById("download-sites-geojson").addEventListener("click", exportCandidateSites);
   document.getElementById("print-brief").addEventListener("click", () => window.print());
 }
