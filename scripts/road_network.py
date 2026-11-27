@@ -16,6 +16,7 @@ from __future__ import annotations
 import heapq
 import json
 import math
+import sqlite3
 from pathlib import Path
 
 import duckdb
@@ -76,7 +77,24 @@ def fetch_road_rows(route_db: Path) -> list[tuple[str, str, str]]:
     use the short stretches that cross into neighbouring districts.
     """
     if not route_db.exists():
-        raise FileNotFoundError(f"Road network database missing at {route_db}. Run: python scripts/build_db.py")
+        # Git contains the analysis database and district road geometries, but
+        # not the larger DuckDB clip built from the original Lab 4 sources.
+        # Use the committed roads so a fresh clone can still render the map.
+        fallback_db = route_db.with_name("dedza.sqlite")
+        if fallback_db.exists():
+            with sqlite3.connect(str(fallback_db)) as fallback:
+                rows = fallback.execute(
+                    "SELECT lower(coalesce(CAST(highway AS TEXT), '')), '', geojson "
+                    "FROM roads WHERE geojson IS NOT NULL"
+                ).fetchall()
+            if rows:
+                print(
+                    "Road network: using committed Dedza road geometries; "
+                    "rebuild clip.duckdb from Lab 4 sources for full cross-border routing.",
+                    flush=True,
+                )
+                return rows
+        raise FileNotFoundError(f"Road network database missing at {route_db}; no roads fallback found.")
     con = duckdb.connect(str(route_db), read_only=True)
     try:
         con.execute("INSTALL spatial;")

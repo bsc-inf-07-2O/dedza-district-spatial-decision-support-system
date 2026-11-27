@@ -1,0 +1,11 @@
+[general]
+name=Dedza District SDSS Layers
+qgisMinimumVersion=3.22
+description=Load the Dedza SDSS database layers and available source rasters into the current QGIS project.
+version=1.0.0
+author=Dedza SDSS project team
+email=
+about=Loads available vector layers from data/processed/dedza.sqlite, source GeoJSON files and GeoTIFF rasters from this project checkout.
+category=Vector
+experimental=False
+deprecated=False

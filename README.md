@@ -53,7 +53,16 @@ static/
     ui/                 Reusable widgets (dropdown, popups, notifications, shell)
     features/           One file per tool or panel (routes, sites, gap, priority, ...)
 tests/                  pytest suite (python -m pytest)
+qgis_plugin/            QGIS Python plugin for loading the project's GIS layers
 ```
+
+## QGIS Python plugin
+
+The optional Python plugin in `qgis_plugin/` loads the existing SQLite vector
+layers, source GeoJSON boundaries and every available GeoTIFF into grouped QGIS
+layers. See [qgis_plugin/README.md](qgis_plugin/README.md) for installation and
+use. The Flask and Leaflet app remains the main project workflow and runs with
+`python app.py`.
 
 Each module starts with a comment saying what it does. A new API endpoint goes in the matching file under `sdss/routes/`; a new tool usually needs a `static/js/features/` module, wired up in `static/js/app.js`.
 
@@ -72,7 +81,7 @@ python scripts/import_worldpop.py
 - **MHFR:** queries the public API of the Ministry of Health's [Malawi Health Facility Registry](https://zipatala.health.gov.mw) and stores operational Dedza facilities with ownership.
 - **WorldPop:** requires `rasterio` and `data/raw/mwi_pop_2025_CN_100m_R2025A_v1.tif`.
 
-Restart the app after importing. At startup it prepares the road network in the background ("Road network and scenario baselines ready." in the terminal) so the first site comparison is fast.
+Restart the app after importing. At startup it prepares the road network in the background ("Road network and scenario baselines ready." in the terminal) so the first site comparison is fast. A fresh clone uses the committed Dedza road geometries if `data/processed/clip.duckdb` is absent; that fallback keeps map and settlement layers usable. Rebuild from Lab 4 source files for full cross-border routing and the complete walking network used by travel analysis.
 
 Import the population-growth and flood-hazard layers (needed by the build; the clipped outputs are committed in `data/raw/`):
 
