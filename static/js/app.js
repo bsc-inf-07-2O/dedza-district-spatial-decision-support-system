@@ -11,6 +11,7 @@ import { setupNotice } from "./ui/notice.js";
 import { enhanceNumberInput } from "./ui/number-input.js";
 import { setupRangeFills } from "./ui/range.js";
 import { setupShell } from "./ui/shell.js";
+import { setupTour, startTourOnFirstVisit } from "./ui/tour.js";
 import { setupBriefingActions, setupInsightTabs, setupPopupActions } from "./features/actions.js";
 import { activeData, selectDistrict, setupAreaControls, showDistrictBoundary } from "./features/area.js";
 import { setupExport } from "./features/export.js";
@@ -80,10 +81,12 @@ async function init() {
   setupInsightTabs();
   setupPopupActions();
   setupLayerToggles();
+  startTourOnFirstVisit();
 }
 
 setupRangeFills();
 setupShell();
+setupTour();
 init().catch((err) => {
   console.error(err);
   mapStatus.hidden = false;
