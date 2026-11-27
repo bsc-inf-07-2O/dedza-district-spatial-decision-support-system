@@ -7,7 +7,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 from app import app
-from scripts.road_network import haversine_km, motorcycle_speed_kmh
+from scripts.road_network import build_graph, haversine_km, motorcycle_speed_kmh
 from scripts.site_constraints import point_in_geometry
 from sdss import config, routing, walking
 from sdss.data import building_at, db, load_payloads
@@ -904,7 +904,53 @@ def test_walking_route_uses_paths_at_walking_speed(client):
     assert walking["estimated_network_time_min"] == pytest.approx(walking["network_distance_km"] / 5 * 60, rel=1e-6)
     assert walking["network_distance_km"] <= vehicle["network_distance_km"] + 1e-6  # footpaths can only shorten it
     assert walking["estimated_network_time_min"] > vehicle["estimated_network_time_min"]
-    assert client.post("/api/route", json={**body, "mode": "bicycle"}).status_code == 400
+    assert client.post("/api/route", json={**body, "mode": "car"}).status_code == 400
+
+
+def test_route_times_by_travel_mode(client):
+    settlement = load_payloads()["settlements"][10]
+    facility = load_payloads()["facilities"][5]
+    body = {"origin": [settlement["lon"], settlement["lat"]], "destination": [facility["lon"], facility["lat"]]}
+    times = {}
+    for mode in ("walking", "bicycle", "vehicle"):
+        result = client.post("/api/route", json={**body, "mode": mode}).get_json()
+        assert result["mode"] == mode
+        times[mode] = result["estimated_network_time_min"]
+        if mode == "bicycle":
+            assert result["label"] == "Shortest cycling route"
+            assert times[mode] == pytest.approx(result["network_distance_km"] / 12 * 60, rel=1e-6)
+    # The same trip takes longest on foot and shortest by motorcycle.
+    assert times["walking"] > times["bicycle"] > times["vehicle"]
+
+
+def test_bicycle_network_uses_paths_but_not_steps():
+    line = lambda a, b: json.dumps({"type": "LineString", "coordinates": [a, b]})
+    rows = [
+        ("path", "", line([34.0, -14.0], [34.01, -14.0])),
+        ("steps", "", line([34.01, -14.0], [34.01, -14.01])),
+    ]
+    graph = build_graph(rows, "bicycle")
+    assert (34.0, -14.0) in graph and (34.01, -14.01) not in graph
+    (_, distance, minutes), = graph[(34.0, -14.0)]
+    assert minutes == pytest.approx(distance / 12 * 60)
+    with pytest.raises(ValueError):
+        build_graph(rows, "car")
+
+
+def test_scenario_time_bands_follow_travel_mode(client):
+    body = {"coordinates": [34.3, -14.2], "type": "health", "radius_km": 5}
+    labels = {}
+    for mode in ("vehicle", "bicycle", "walking"):
+        access = client.post("/api/scenario-population", json={**body, "travel_mode": mode}).get_json()["road_time_access"]
+        assert access["mode"] == mode
+        labels[mode] = access["mode_label"]
+        if mode != "vehicle":
+            assert list(access["speed_assumptions_kmh"].values()) == [5.0 if mode == "walking" else 12.0]
+    assert labels == {"vehicle": "motorcycle", "bicycle": "bicycle", "walking": "walking"}
+    # Without travel_mode the bands stay on motorcycle speeds, as before.
+    default = client.post("/api/scenario-population", json=body).get_json()["road_time_access"]
+    assert default["mode"] == "vehicle"
+    assert client.post("/api/scenario-population", json={**body, "travel_mode": "car"}).status_code == 400
 
 
 def test_settlement_walking_distance_to_nearest_service(client):

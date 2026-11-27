@@ -11,6 +11,7 @@ import { renderScenario } from "./site-results.js";
 
 const scenarioTypeInput = document.getElementById("scenario-type");
 const scenarioRadiusInput = document.getElementById("scenario-radius");
+const scenarioTravelModeInput = document.getElementById("scenario-travel-mode");
 const scenarioStatus = document.getElementById("scenario-status");
 const placeScenarioButton = document.getElementById("place-scenario");
 const clearScenarioButton = document.getElementById("clear-scenario");
@@ -25,6 +26,8 @@ export function screenCandidateSite(coordinates) {
 export async function estimateScenarioCandidate(candidate) {
   candidate.estimateVersion = (candidate.estimateVersion || 0) + 1;
   const version = candidate.estimateVersion;
+  // Travel mode for the time bands: motorcycle ("vehicle"), bicycle or walking.
+  candidate.travelMode = candidate.travelMode || scenarioTravelModeInput.value;
   candidate.populationEstimate = null;
   candidate.populationError = "";
   candidate.loading = true;
@@ -34,6 +37,7 @@ export async function estimateScenarioCandidate(candidate) {
       coordinates: candidate.point.geometry.coordinates,
       type: candidate.type,
       radius_km: candidate.radius,
+      travel_mode: candidate.travelMode,
     }, "Population estimate");
     if (!Number.isFinite(result.additional_population_estimate)) {
       throw new Error("The population estimate response was incomplete.");
@@ -53,11 +57,12 @@ export async function estimateScenarioCandidate(candidate) {
   }
 }
 
-// Facility type or radius changed: re-estimate every candidate with the new values.
+// Facility type, radius or travel mode changed: re-estimate every candidate with the new values.
 function refreshScenarioEstimates() {
   state.scenarios.forEach((candidate) => {
     candidate.type = scenarioTypeInput.value;
     candidate.radius = Number(scenarioRadiusInput.value);
+    candidate.travelMode = scenarioTravelModeInput.value;
     estimateScenarioCandidate(candidate);
   });
 }
@@ -194,6 +199,11 @@ export function setupSiteControls() {
     }
   });
   scenarioTypeInput.addEventListener("change", () => {
+    if (state.scenarios.length) {
+      refreshScenarioEstimates();
+    }
+  });
+  scenarioTravelModeInput.addEventListener("change", () => {
     if (state.scenarios.length) {
       refreshScenarioEstimates();
     }

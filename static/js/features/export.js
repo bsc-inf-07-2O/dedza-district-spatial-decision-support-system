@@ -5,7 +5,7 @@ import { state } from "../state.js";
 import { csvField, nearPlace } from "../ui/format.js";
 import { activeData } from "./area.js";
 import { buildRecommendedActions } from "./briefing.js";
-import { getScenarioMetrics } from "./site-results.js";
+import { getScenarioMetrics, getScenarioRoadMetrics, travelModeLabel } from "./site-results.js";
 
 function exportPlanningBrief() {
   const { siteLayers } = data;
@@ -78,6 +78,21 @@ function exportPlanningBrief() {
         : "Not screened; building data unavailable",
     ]);
     rows.push(["scenario", areaLabel, `${label} radius km`, candidate.radius]);
+    rows.push(["scenario", areaLabel, `${label} travel-time mode`, travelModeLabel(candidate)]);
+    if (candidate.populationEstimate) {
+      const travel = getScenarioRoadMetrics(active, candidate);
+      if (travel.available) {
+        travel.bands.forEach((band) => {
+          rows.push([
+            "scenario", areaLabel,
+            `${label} settlements newly within ${band.minutes} min by ${travelModeLabel(candidate)}`,
+            band.newlyReachable.length,
+          ]);
+        });
+      } else {
+        rows.push(["scenario", areaLabel, `${label} travel-time access`, travel.reason]);
+      }
+    }
     rows.push(["scenario", areaLabel, `${label} additional settlements in selected geography`, metrics.gain]);
     if (candidate.populationEstimate) {
       rows.push([

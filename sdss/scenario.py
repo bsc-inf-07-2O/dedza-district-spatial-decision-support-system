@@ -21,7 +21,7 @@ from . import config
 from .data import load_payloads, load_traditional_authorities
 from .routing import (
     load_road_network,
-    motorcycle_speed_assumptions_kmh,
+    speed_assumptions_kmh,
     nearest_road_node,
     road_times_to_sources,
 )
@@ -162,13 +162,18 @@ def estimate_scenario_population(lon: float, lat: float, radius_km: float, facil
 # Road travel time to the site
 # ---------------------------------------------------------------------------
 
-@lru_cache(maxsize=2)
+TRAVEL_MODE_NAMES = {"vehicle": "motorcycle", "bicycle": "bicycle", "walking": "walking"}
+
+
+@lru_cache(maxsize=6)
 def scenario_baseline_road_times(
     facility_type: str,
+    mode: str = "vehicle",
 ) -> dict[tuple[str, float, float], tuple[tuple[float, float], float, float | None]]:
-    """Per settlement: nearest road node, snap distance and time to the nearest existing service."""
+    """Per settlement: nearest network node, snap distance and travel time (by
+    `mode`) to the nearest existing service."""
     payloads = load_payloads()
-    graph, _, projected = load_road_network()
+    graph, _, projected = load_road_network(mode)
     existing_sites = payloads["schools"] if facility_type == "school" else payloads["facilities"]
     site_points = [(float(site["lon"]), float(site["lat"])) for site in existing_sites]
     site_nodes = [nearest_road_node(point, projected) for point in site_points]
@@ -194,36 +199,45 @@ def scenario_baseline_road_times(
     return baselines
 
 
-def estimate_scenario_road_access(lon: float, lat: float, facility_type: str) -> dict:
-    """Road travel time from each settlement to the candidate and to existing services."""
-    graph, _, projected = load_road_network()
+def estimate_scenario_road_access(lon: float, lat: float, facility_type: str, mode: str = "vehicle") -> dict:
+    """Travel time (by `mode`: "vehicle" motorcycle, "bicycle" or "walking")
+    from each settlement to the candidate and to existing services."""
+    graph, _, projected = load_road_network(mode)
     candidate_point = (lon, lat)
     candidate_node = nearest_road_node(candidate_point, projected)
     candidate_snap_distance = haversine_km(candidate_point, candidate_node)
+    network = "roads" if mode == "vehicle" else "roads, tracks and paths"
+    speeds = (
+        "indicative motorcycle speeds by road class, without traffic, road condition, stops or season"
+        if mode == "vehicle"
+        else f"{TRAVEL_MODE_NAMES[mode]} at a steady {next(iter(speed_assumptions_kmh(mode).values())):g} km/h, "
+        "without rests, hills or river crossings"
+    )
     result = {
         "available": candidate_snap_distance <= config.MAX_ROAD_SNAP_KM,
+        "mode": mode,
+        "mode_label": TRAVEL_MODE_NAMES[mode],
         "time_bands_minutes": list(config.SCENARIO_TRAVEL_TIME_BANDS_MIN),
         "candidate_road_distance_km": round(candidate_snap_distance, 2),
-        "speed_assumptions_kmh": motorcycle_speed_assumptions_kmh(),
+        "speed_assumptions_kmh": speed_assumptions_kmh(mode),
         "connector_time_included": False,
         "capacity_assessment_available": False,
         "method": (
-            "Road-network travel times from mapped settlements to the proposed site, compared with "
-            "the nearest existing same-type baseline service. Straight-line access connectors are "
-            "excluded; points more than 1 km from mapped roads are not assessed. Speeds are indicative "
-            "motorcycle assumptions and do not account for traffic, road condition, stops, or season."
+            f"Travel times by {TRAVEL_MODE_NAMES[mode]} along mapped {network} from mapped settlements to the "
+            "proposed site, compared with the nearest existing same-type baseline service. Straight-line access "
+            f"connectors are excluded; points more than 1 km from the mapped network are not assessed. Speeds: {speeds}."
         ),
         "settlements": [],
     }
     if candidate_snap_distance > config.MAX_ROAD_SNAP_KM:
         result["reason"] = (
-            f"The candidate is {candidate_snap_distance:.1f} km from the nearest mapped road; "
-            f"road-time analysis is limited to sites within {config.MAX_ROAD_SNAP_KM:g} km of a mapped road."
+            f"The candidate is {candidate_snap_distance:.1f} km from the nearest mapped {network}; "
+            f"travel-time analysis is limited to sites within {config.MAX_ROAD_SNAP_KM:g} km of the network."
         )
         return result
 
     payloads = load_payloads()
-    baseline_times = scenario_baseline_road_times(facility_type)
+    baseline_times = scenario_baseline_road_times(facility_type, mode)
     # One search from the candidate gives every settlement's time to it.
     times_to_candidate = road_times_to_sources(graph, {candidate_node}, config.MAX_SCENARIO_TRAVEL_TIME_MIN)
     for settlement in payloads["settlements"]:

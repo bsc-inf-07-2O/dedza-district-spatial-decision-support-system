@@ -1,8 +1,10 @@
-"""Walking and vehicle networks built from the OpenStreetMap roads and paths.
+"""Walking, bicycle and vehicle networks built from the OpenStreetMap roads and paths.
 
 * walking - every mapped way (roads, tracks, paths, footways) in both
   directions at WALKING_SPEED_KMH. Used for the 5 km access standard,
   coverage, population reach and site suggestions.
+* bicycle - every mapped way except steps, in both directions, at
+  BICYCLE_SPEED_KMH. Used for cycling routes and travel-time bands.
 * vehicle - roads and tracks only (no paths or footways), one-way streets
   respected, indicative motorcycle speeds by road class. Used for travel
   time by motorcycle or ambulance.
@@ -22,8 +24,12 @@ import duckdb
 import numpy as np
 
 WALKING_SPEED_KMH = 5.0
+# An everyday loaded bicycle on mixed rural roads and paths, not a sports average.
+BICYCLE_SPEED_KMH = 12.0
 # OSM classes a motor vehicle cannot use.
 NON_VEHICLE_CLASSES = {"path", "footway", "pedestrian", "steps", "bridleway", "cycleway"}
+# OSM classes a bicycle cannot be ridden on.
+NON_BICYCLE_CLASSES = {"steps"}
 
 Graph = dict[tuple[float, float], list[tuple[tuple[float, float], float, float]]]
 
@@ -95,15 +101,22 @@ def fetch_road_rows(route_db: Path) -> list[tuple[str, str, str]]:
 
 
 def build_graph(rows: list[tuple[str, str, str]], mode: str) -> Graph:
-    if mode not in ("walking", "vehicle"):
-        raise ValueError("mode must be walking or vehicle")
+    if mode not in ("walking", "bicycle", "vehicle"):
+        raise ValueError("mode must be walking, bicycle or vehicle")
     graph: Graph = {}
     for highway, oneway, geojson in rows:
         if not geojson:
             continue
         if mode == "vehicle" and highway in NON_VEHICLE_CLASSES:
             continue
-        speed = WALKING_SPEED_KMH if mode == "walking" else motorcycle_speed_kmh(highway)
+        if mode == "bicycle" and highway in NON_BICYCLE_CLASSES:
+            continue
+        if mode == "walking":
+            speed = WALKING_SPEED_KMH
+        elif mode == "bicycle":
+            speed = BICYCLE_SPEED_KMH
+        else:
+            speed = motorcycle_speed_kmh(highway)
         directed = mode == "vehicle"
         for line in road_lines(json.loads(geojson)):
             previous = None

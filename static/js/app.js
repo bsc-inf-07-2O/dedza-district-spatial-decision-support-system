@@ -53,7 +53,7 @@ async function init() {
 
   // Form controls
   fillRouteOptions();
-  ["ta-select", "route-mode", "route-settlement", "route-facility", "scenario-type"]
+  ["ta-select", "route-mode", "route-settlement", "route-facility", "scenario-type", "scenario-travel-mode"]
     .forEach((id) => enhanceSelect(document.getElementById(id)));
   ["school-radius", "scenario-radius"]
     .forEach((id) => enhanceNumberInput(document.getElementById(id)));

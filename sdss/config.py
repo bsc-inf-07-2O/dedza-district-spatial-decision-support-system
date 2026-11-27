@@ -42,7 +42,7 @@ ACCESS_ROAD_CLASSES = (
 )
 
 # Routing and scenario settings
-ROUTE_MODES = ("walking", "vehicle")
+ROUTE_MODES = ("walking", "bicycle", "vehicle")  # "vehicle" = motorcycle / ambulance
 SCENARIO_TRAVEL_TIME_BANDS_MIN = (30, 60)
 MAX_SCENARIO_TRAVEL_TIME_MIN = max(SCENARIO_TRAVEL_TIME_BANDS_MIN)
 MAX_ROAD_SNAP_KM = 1.0
