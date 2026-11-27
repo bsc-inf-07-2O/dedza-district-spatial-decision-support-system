@@ -135,37 +135,6 @@ def shortest_road_path(
     return list(reversed(path))
 
 
-def shortest_road_time_to_target(graph: Graph, start: Node, target: Node, max_time_min: float) -> float | None:
-    """Quickest time from `start` to `target`, or None beyond `max_time_min`."""
-    if start not in graph or target not in graph:
-        return None
-    if start == target:
-        return 0.0
-
-    def heuristic(node: Node) -> float:
-        return haversine_km(node, target) * 1.5
-
-    costs = {start: 0.0}
-    queue = [(heuristic(start), 0.0, start)]
-    while queue:
-        estimated_total, cost_so_far, current = heapq.heappop(queue)
-        if estimated_total > max_time_min:
-            break
-        if cost_so_far > costs.get(current, float("inf")):
-            continue
-        if current == target:
-            return cost_so_far
-        for neighbor, _, time_min in graph[current]:
-            candidate = cost_so_far + time_min
-            if candidate > max_time_min or candidate >= costs.get(neighbor, float("inf")):
-                continue
-            estimated_candidate = candidate + heuristic(neighbor)
-            if estimated_candidate <= max_time_min:
-                costs[neighbor] = candidate
-                heapq.heappush(queue, (estimated_candidate, candidate, neighbor))
-    return None
-
-
 def reverse_road_graph(graph: Graph) -> Graph:
     """Edges flipped (v -> u for every u -> v), cached for the current graph object."""
     global _REVERSED_GRAPH

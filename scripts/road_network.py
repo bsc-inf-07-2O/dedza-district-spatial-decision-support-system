@@ -180,9 +180,6 @@ class NodeIndex:
         i = int(np.argmin(distances))
         return self.nodes[i], haversine_km(point, self.nodes[i])
 
-    def nearest_many(self, points: list[tuple[float, float]]) -> list[tuple[tuple[float, float], float]]:
-        return [self.nearest(point) for point in points]
-
     def _buckets(self, cell_km: float) -> dict[tuple[int, int], np.ndarray]:
         cache = getattr(self, "_bucket_cache", {})
         if cell_km not in cache:

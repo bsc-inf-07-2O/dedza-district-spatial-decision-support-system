@@ -13,7 +13,7 @@ const gapUnderservedValue = document.getElementById("gap-underserved-value");
 const gapAnalysisResults = document.getElementById("gap-analysis-results");
 let gapAnalysisTimer = null;
 
-export function renderGapAnalysisSummary(result) {
+function renderGapAnalysisSummary(result) {
   state.gapServedKm = result.served_km;
   state.gapUnderservedKm = result.underserved_km;
   state.gapCoverage = new Map(

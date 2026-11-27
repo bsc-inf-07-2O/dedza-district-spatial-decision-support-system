@@ -58,11 +58,6 @@ def waterways():
     return jsonify(load_payloads()["waterways"])
 
 
-@bp.get("/recommendations")
-def recommendations():
-    return jsonify(load_payloads()["recommendations"])
-
-
 # ---------------------------------------------------------------------------
 # Services and settlements
 # ---------------------------------------------------------------------------

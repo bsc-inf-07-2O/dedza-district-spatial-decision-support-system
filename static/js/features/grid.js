@@ -11,7 +11,7 @@ export const cellScore = (properties) =>
   state.priorityScores.get(Number(properties.cell_id)) ?? properties.priority_score;
 
 // One-line planning suggestion for a cell, from its own figures.
-export function planningPrompt(properties) {
+function planningPrompt(properties) {
   const { roadAccessKm } = data;
   const prompts = [];
   if (properties.dist_km > 8) prompts.push("Assess a new health post or health centre");

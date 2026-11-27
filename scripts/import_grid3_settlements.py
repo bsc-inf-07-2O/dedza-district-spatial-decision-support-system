@@ -53,7 +53,7 @@ def load_grid3(gpkg: Path) -> list[tuple]:
         con.execute("SET geometry_always_xy = true;")
         return con.execute(
             f"""
-            SELECT s.OBJECTID, s.type, s.building_count, s.building_area, s.probability,
+            SELECT s.OBJECTID, s.type, s.building_count, s.building_area,
                    ST_X(ST_PointOnSurface(s.Shape)), ST_Y(ST_PointOnSurface(s.Shape)),
                    ST_AsGeoJSON(s.Shape)
             FROM ST_Read(?) AS s, ST_Read(?) AS d
@@ -100,7 +100,7 @@ def main() -> None:
         records = []
         used_names: dict[str, int] = {}
         with rasterio.open(WORLDPOP_PATH) as raster:
-            for oid, kind, buildings, area, probability, lon, lat, geojson in rows:
+            for oid, kind, buildings, area, lon, lat, geojson in rows:
                 point = Point(lon, lat)
                 ta = next((name for name, poly in tas if poly.contains(point)), "")
                 try:

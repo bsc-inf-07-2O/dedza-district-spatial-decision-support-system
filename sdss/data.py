@@ -68,7 +68,6 @@ def load_payloads() -> dict:
     meta = {row["key"]: row["value"] for row in con.execute("SELECT key, value FROM meta")}
     boundary = json.loads(con.execute("SELECT geojson FROM boundary").fetchone()[0])
     facilities = [dict(r) for r in con.execute("SELECT * FROM facilities")]
-    recs = [dict(r) for r in con.execute("SELECT * FROM recommendations ORDER BY rank")]
     tables = {
         row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
@@ -136,7 +135,6 @@ def load_payloads() -> dict:
         "cells": cells,
         "roads": roads,
         "waterways": waterways,
-        "recommendations": recs,
     }
 
 

@@ -30,8 +30,6 @@ def summary():
         "meta": data["meta"],
         "type_counts": data["type_counts"],
         "coverage": data["coverage"],
-        "recommendations": data["recommendations"],
-        "n_registry_facilities": len(data["registry"]),
     })
 
 

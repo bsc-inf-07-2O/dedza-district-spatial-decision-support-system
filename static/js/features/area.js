@@ -18,7 +18,7 @@ export function showDistrictBoundary() {
 
 // ---- What lies inside the selected area ----
 
-export function intersectsSelectedArea(feature) {
+function intersectsSelectedArea(feature) {
   if (!state.areas.length) return true;
   try {
     return state.areas.some((area) => turf.booleanIntersects(feature, area));

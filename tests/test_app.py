@@ -11,7 +11,7 @@ from scripts.road_network import haversine_km, motorcycle_speed_kmh
 from scripts.site_constraints import point_in_geometry
 from sdss import config, routing, walking
 from sdss.data import building_at, db, load_payloads
-from sdss.routing import calculate_road_route, project_road_node, shortest_road_time_to_target
+from sdss.routing import calculate_road_route, project_road_node
 from sdss.scenario import estimate_scenario_road_access, scenario_baseline_road_times
 
 
@@ -390,11 +390,7 @@ def test_road_time_search_honors_direction_and_time_limit():
         target: [],
     }
 
-    assert shortest_road_time_to_target(graph, start, target, 60) == pytest.approx(35)
-    assert shortest_road_time_to_target(graph, start, target, 30) is None
-    assert shortest_road_time_to_target(graph, target, start, 60) is None
-
-    # The multi-source search used for scenarios gives the same directed times.
+    # Times run along the directed roads and stop at the time limit.
     times = routing.road_times_to_sources(graph, {target}, 60)
     assert times[start] == pytest.approx(35)
     assert times[middle] == pytest.approx(15)

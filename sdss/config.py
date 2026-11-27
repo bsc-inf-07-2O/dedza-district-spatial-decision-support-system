@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.planning_analysis import FLOOD_DEPTH_PATH, PERMANENT_WATER_PATH, POPULATION_PATHS  # noqa: F401 (re-exported)
+from scripts import planning_analysis
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
@@ -20,7 +20,10 @@ DB_PATH = PROCESSED / "dedza.sqlite"
 ROUTE_DB_PATH = PROCESSED / "clip.duckdb"
 SITE_CONSTRAINT_DB_PATH = PROCESSED / "site_constraints.sqlite"
 
-# Rasters
+# Rasters (the planning layers are defined with their import script)
+FLOOD_DEPTH_PATH = planning_analysis.FLOOD_DEPTH_PATH
+PERMANENT_WATER_PATH = planning_analysis.PERMANENT_WATER_PATH
+POPULATION_PATHS = planning_analysis.POPULATION_PATHS
 ENVIRONMENTAL_RASTER_PATHS = {
     "land_cover": PROCESSED / "environmental" / "land_cover.tif",
     "slope": PROCESSED / "environmental" / "slope.tif",
