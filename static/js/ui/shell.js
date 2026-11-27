@@ -101,11 +101,21 @@ const deckMax = () => Math.max(DECK_MIN, Math.round(workspace.getBoundingClientR
 function setDeckSize(pixels, remember = true) {
   const size = Math.min(deckMax(), Math.max(DECK_MIN, Math.round(pixels)));
   insightsDeck.style.setProperty("--deck-size", `${size}px`);
-  deckResizer.setAttribute("aria-valuenow", String(size));
   if (remember) storeSetting(DECK_SIZE_KEY, String(size));
 }
 
+// The resize handle is an ARIA separator: screen readers need its current,
+// smallest and largest drawer height.
+function syncResizerValues() {
+  const height = Math.round(insightsDeck.getBoundingClientRect().height);
+  deckResizer.setAttribute("aria-valuemin", String(DECK_MIN));
+  deckResizer.setAttribute("aria-valuemax", String(Math.max(deckMax(), height)));
+  deckResizer.setAttribute("aria-valuenow", String(height));
+  deckResizer.setAttribute("aria-valuetext", `Insights drawer ${height} pixels high`);
+}
+
 function setupDeck() {
+  syncResizerValues();
   deckToggle.addEventListener("click", () => setDeckCollapsed(!insightsDeck.classList.contains("collapsed")));
   document.querySelectorAll(".analysis-tab").forEach((tab) => {
     tab.addEventListener("click", () => setDeckCollapsed(false));
@@ -152,6 +162,7 @@ export function setupShell() {
     new ResizeObserver(() => map.invalidateSize({ pan: false })).observe(map.getContainer());
     new ResizeObserver(([entry]) => {
       workspace.style.setProperty("--deck-height", `${Math.round(entry.target.getBoundingClientRect().height)}px`);
+      syncResizerValues();
     }).observe(insightsDeck);
   }
 }

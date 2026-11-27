@@ -95,6 +95,9 @@
 .analysis-tab.active { background: rgba(244, 197, 66, 0.16); color: var(--accent); }
 .analysis-deck.collapsed .analysis-tab.active { background: transparent; color: var(--muted); }
 .analysis-tab:focus-visible { outline: none; box-shadow: var(--ring); }
+/* The tablist wrapper only groups the tabs for screen readers; layout ignores it. */
+.analysis-tablist { display: contents; }
+.table-scroll:focus-visible { outline: none; box-shadow: var(--ring); }
 .export-button { margin: 5px 0 5px auto; white-space: nowrap; }
 .analysis-tabs .export-button { margin: 3px 0 4px auto; padding: 6px 12px; font-size: 12px; }
 
